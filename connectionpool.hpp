@@ -80,6 +80,9 @@ namespace project
 
 		friend void connInit(std::string, int, std::string, std::string, std::string, int, bool);
 
+		// 提供一个逃逸函数接口，利用池中任一空闲连接完成字符转义
+		std::string escapeString(const std::string& str);
+
 	private:
 		std::string addr_, user_, passwd_, dbname_;
 		Mutex mutex_;
@@ -109,7 +112,7 @@ namespace project
             LOG_ERR(e.getMessage());
 			if (e.getType() == kErrType::Sql_conn && ConnPool::getInstance().conn_->size())
 				LOG_INFO("Perhaps because of the limit connections or wrong password...?");
-            exit(exit_code = 1);
+			exit(exit_code = 1);
 		}
 	}
 }
