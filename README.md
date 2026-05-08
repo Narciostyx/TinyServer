@@ -60,7 +60,7 @@ Error Type（`project::kErrType`）
     - 说明：为避免跨 pthread 边界传播异常，线程入口吞掉所有异常
 
 ## alloc.hpp
-- class CustomizedAllocator;
+- ~~class CustomizedAllocator;~~
     - **自定义分配器**，线性分配器
     - **废弃**
 
@@ -103,8 +103,6 @@ Error Type（`project::kErrType`）
 ## router.hpp/router.cpp
  - class Router
      - **轻量级 HTTP 路由系统**，基于精确路径和方法进行请求分发
-     - 提供单例模式，通过 `Router::get_instance()` 获取全局唯一的路由实例
-     - `void register_route(const std::string& method, const std::string& path, HandlerFunc handler)`：注册一个路由，将指定的方法和路径与对应的业务处理函数（HandlerFunc）绑定
      - `std::vector<char> handle_request(const std::vector<char>& raw_request)`：对外处理总入口。接收原始字节格式的 HTTP 请求，内部反序列化出 `HttpRequest`，查找对应路由。并将产生的 `HttpResponse` 再次序列化为字节输出
 
 ## acceptor.hpp/acceptor.cpp
