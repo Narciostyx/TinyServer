@@ -2,36 +2,22 @@
 #define _HTTP_HPP
 
 #include <string>
-#include <unordered_map>
+#include <boost/beast/http.hpp>
 
 namespace project
 {
-	// HTTP请求结构（最简版）
-	struct HttpRequest
-	{
-		std::string method;
-		std::string path;
-		std::string version;
-		std::unordered_map<std::string, std::string> headers;
-		std::string body;
-	};
+	// 使用 Boost.Beast 提供的 HTTP 请求和响应类型
+	using HttpRequest = boost::beast::http::request<boost::beast::http::string_body>;
+	using HttpResponse = boost::beast::http::response<boost::beast::http::string_body>;
 
-	// HTTP响应结构（最简版）
-	struct HttpResponse
-	{
-		int status = 200;
-		std::string reason = "OK";
-		std::unordered_map<std::string, std::string> headers;
-		std::string body;
-
-		std::string to_string() const;
-	};
-
-	// 解析HTTP请求（最简版，支持Content-Length）
+	// 解析HTTP请求
 	// 返回：
 	// - true：解析成功（out被填充）
 	// - false：数据不完整或格式错误
 	bool parse_http_request(const std::string& raw, HttpRequest& out);
+
+	// 将 HttpResponse 序列化为字符串
+	std::string serialize_http_response(HttpResponse& resp);
 }
 
 #endif
