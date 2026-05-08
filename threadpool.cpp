@@ -14,12 +14,18 @@ project::ThreadPool::ThreadPool(size_t thread_count, size_t max_requests)
 // 析构函数：通知所有线程退出并等待
 project::ThreadPool::~ThreadPool() {
     LOG_INFO("Start to destroy the threadpool.");
-    stop_ = true;
+
+    {
+        LockGuard<> lock(queue_mutex_);
+        stop_ = true;
+    }
+
     condition_.broadcast();
     not_full_.broadcast();
     for (auto& t : workers_) {
         if (t.joinable()) t.join();
     }
+    LOG_INFO("Finish to destroy the threadpool.");
 }
 
 // 添加任务到队列（队列满时阻塞等待）
