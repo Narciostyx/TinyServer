@@ -1,11 +1,13 @@
 #include "reactor.hpp"
+#include "connection.hpp"
 
 #include <errno.h>
 #include <stdint.h>
 #include <sys/eventfd.h>
 
 // 子Reactor构造：保存线程池指针
-project::SubReactor::SubReactor(ThreadPool* pool, int max_listen) : threadpool_(pool), listen_max_(max_listen) {
+project::SubReactor::SubReactor(ThreadPool* pool, int max_listen,int timeout) : threadpool_(pool), listen_max_(max_listen),time_out_(timeout) {
+    last_check_time_ = std::chrono::steady_clock::now();
     epoll_fd_ = epoll_create1(0);
     if (epoll_fd_ < 0)
         throw Err("Failed to create the file descriptor of epoll.", kErrType::Reactor_init);
@@ -71,10 +73,11 @@ bool project::SubReactor::add_fd(int fd) {
     return true;
 }
 
-void project::SubReactor::set_callbacks(int fd, EventCallback read_cb, EventCallback write_cb) {
+void project::SubReactor::set_callbacks(int fd, EventCallback read_cb, EventCallback write_cb, std::shared_ptr<Connection> conn) {
     if (fd_contexts_.count(fd)) {
         fd_contexts_[fd].read_cb = std::move(read_cb);
         fd_contexts_[fd].write_cb = std::move(write_cb);
+        fd_contexts_[fd].conn_ptr = std::move(conn);
     }
 }
 
@@ -103,17 +106,46 @@ bool project::SubReactor::remove_fd(int fd) {
     return true;
 }
 
+void project::SubReactor::check_idle_connections() {
+    auto now = std::chrono::steady_clock::now();
+    if (std::chrono::duration_cast<std::chrono::seconds>(now - last_check_time_).count() < time_out_) {
+        return;
+    }
+    last_check_time_ = now;
+
+    std::vector<int> to_close;
+    for (auto& pair : fd_contexts_) {
+        if (pair.second.conn_ptr) {
+            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                now - pair.second.conn_ptr->last_active_time()).count();
+            if (elapsed > idle_timeout_s_) {
+                LOG_WARN("fd " + std::to_string(pair.first) + " timeout, will close.");
+                to_close.push_back(pair.first);
+            }
+        }
+    }
+    for (int fd : to_close) {
+        // Send a disconnect message before closing
+        const char disconnect_msg[] = "Server forced disconnect due to inactivity\r\n";
+        ::send(fd, disconnect_msg, sizeof(disconnect_msg) - 1, MSG_NOSIGNAL);
+        remove_fd(fd);
+    }
+}
+
 void project::SubReactor::loop() {
     const int MAX_EVENTS = kMaxListenNum;
     epoll_event events[MAX_EVENTS];
     while (running_.load(std::memory_order_relaxed)) {
-        int n = epoll_wait(epoll_fd_, events, MAX_EVENTS, -1);
+        int n = epoll_wait(epoll_fd_, events, MAX_EVENTS, 3000); // 3 seconds timeout
         if (n < 0)
         {
             if (errno == EINTR) continue;
             LOG_ERR("epoll_wait failed.");
             continue;
         }
+
+        check_idle_connections();
+
         for (int i = 0; i < n; ++i) {
             int fd = events[i].data.fd;
             uint32_t trigger_events = events[i].events;
@@ -132,6 +164,10 @@ void project::SubReactor::loop() {
 
             auto& ctx = fd_contexts_[fd];
             bool should_close = false;
+
+            if (ctx.conn_ptr) {
+                ctx.conn_ptr->update_last_active_time();
+            }
 
             // 对端关闭连接或发生错误
             if (trigger_events & (EPOLLRDHUP | EPOLLHUP | EPOLLERR)) {
