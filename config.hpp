@@ -46,7 +46,7 @@ namespace project
 		int dbport;
 		std::string address, username, passwd, dbname;
 		bool retry;
-		int sub_reactor_num;
+		int sub_reactor_num, time_out, max_listening;
 
 		Config()
 		{
@@ -61,11 +61,13 @@ namespace project
 			log_row_flush = 1;
 			address = "127.0.0.1";
 			dbport = 3306;
-			username = "root";
-			passwd = "root";
-			dbname = "webdb";
+			username = "webdb";
+			passwd = "webdb";
+			dbname = "webdatabase";
 			retry = false;
 			sub_reactor_num = 10;
+			time_out = 600;
+			max_listening = 5000;
 		}
 		//解析命令行参数
 		void parseArg(int, char* []);
@@ -135,7 +137,8 @@ namespace project
 							<< "\nDB_passwd " << passwd
 							<< "\nDB_dbname " << dbname
 							<< "\nDB_retry " << (retry ? 1 : 0)
-							<< "\nSub_reactor_count " << sub_reactor_num;
+							<< "\nSub_reactor_count " << sub_reactor_num
+							<< "\nTime_out_connection " << time_out;
 						file.close();
 						return;
 					}
@@ -163,7 +166,9 @@ namespace project
 						<< "\nDB_passwd " << passwd
 						<< "\nDB_dbname " << dbname
 						<< "\nDB_retry " << (retry ? 1 : 0)
-						<< "\nSub_reactor_count " << sub_reactor_num;
+						<< "\nSub_reactor_count " << sub_reactor_num
+						<< "\nTime_out_connection " << time_out
+						<< "\nMax_listening_connection " << max_listening;
 					file.close();
 					return;
 				}
@@ -176,11 +181,9 @@ namespace project
 				exit(exit_code = -1);
 			}
 
-			// 配置文件格式：一行一个键值对：Key Value
-			 // 例如：Port 8888
-			 //      Log_path ./log/
-			 //      DB_retry 1
+			//键名
 			std::string key;
+			//值
 			std::string val;
 
 			auto parse_int = [](const std::string& s, int& out) -> bool {
@@ -365,6 +368,26 @@ namespace project
 						exit(exit_code = -1);
 					}
 					sub_reactor_num = v;
+				}
+				else if (key == "Time_out_connection")
+				{
+					int v = 0;
+					if (!parse_int(val, v) || v <= 0)
+					{
+						std::cout << "Ilegal value for the Time_out_connection in config file.\n";
+						exit(exit_code = -1);
+					}
+					time_out = v;
+				}
+				else if (key == "Max_listening_connection")
+				{
+					int v = 0;
+					if (!parse_int(val, v) || v <= 0)
+					{
+						std::cout << "Ilegal value for the Max_listening_connection in config file.\n";
+						exit(exit_code = -1);
+					}
+					max_listening = v;
 				}
 				else
 				{
