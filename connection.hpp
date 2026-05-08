@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <chrono>
 #include "http.hpp"
 
 namespace project {
@@ -14,6 +15,7 @@ public:
     Connection(int fd) : fd_(fd) {
         read_buffer_.reserve(8192);
         write_buffer_.reserve(8192);
+        update_last_active_time();
     }
 
     ~Connection() = default;
@@ -50,10 +52,14 @@ public:
     //存储响应
     HttpResponse resp;
 
+    void update_last_active_time() { last_active_time_ = std::chrono::steady_clock::now(); }
+    std::chrono::steady_clock::time_point last_active_time() const { return last_active_time_; }
+
 private:
     int fd_;
     std::vector<char> read_buffer_;
     std::vector<char> write_buffer_;
+    std::chrono::steady_clock::time_point last_active_time_;
 };
 
 } // namespace project
