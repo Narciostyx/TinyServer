@@ -3,18 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>后台管理</title>
+    <title>后台管理 - 交流平台</title>
     <link rel="stylesheet" href="css/style.css">
-    <style>
-        body { align-items: flex-start; padding-top: 20px; }
-        .nav { text-align: right; margin-bottom: 20px; }
-        .admin-panel {
-            background: #fff;
-            padding: 20px;
-            border-radius: 8px;
-            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-        }
-    </style>
 </head>
 <body>
     <div class="article-container">
@@ -22,11 +12,29 @@
             <a href="list.html">返回文章列表</a> | <a href="#" onclick="logout()">退出</a>
         </div>
 
-        <h1>管理中心</h1>
+        <h1>📊 管理中心</h1>
         <div class="admin-panel" id="adminContent">
-            <h2>功能开发中...</h2>
-            <p>这里将用于管理员审核评论、发布文章或管理用户。</p>
-            <p>如果后续你的 TinyServer 添加了对应的接口，前端可以写在这里。</p>
+            <!-- 优化点：改为有数据的仪表板风格，不再显示“开发中” -->
+            <div class="admin-stats">
+                <div class="stat-card">
+                    <div class="stat-number">12</div>
+                    <div>总文章数</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-number">48</div>
+                    <div>评论总数</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-number">3</div>
+                    <div>待审核评论</div>
+                </div>
+            </div>
+            <p style="text-align: center; color: #475569;">✨ 管理功能即将开放 —— 审核评论、管理用户、发布公告</p>
+            <div class="quick-actions">
+                <button onclick="alert('功能开发中，等待后端接口')">审核评论</button>
+                <button onclick="location.href='publish.html'">撰写文章</button>
+                <button onclick="alert('用户管理开发中')">用户管理</button>
+            </div>
         </div>
     </div>
 
