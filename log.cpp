@@ -73,32 +73,32 @@ void project::Log::write_log(int level, const std::string& data)
 		file_.flush();
 		return;
 	}
-	std::string str;
+	std::string msg, lv;
 
 	switch (level)
 	{
 	case INFO:
-		str = "[INFO]\t";
+		lv = "[INFO]";
 		break;
 	case WARNING:
-		str = "[WARNING]\t";
+		lv = "[WARNING]";
 		break;
 	case ERROR:
-		str = "[ERROR]\t";
+		lv = "[ERROR]";
 		break;
 	default:
-		str = "[UNEXPECTED]\t";
+		lv = "[UNEXPECTED]";
 		break;
 	}
 	if (data.size())
-		str += gettime() + "\t" + data + "\n";
+		msg = std::format("{:<12}\t{}\t{}\n", lv, gettime(), data);
 	else
-		str += gettime() + "\tEmpty data input...?\n";
+		msg = std::format("{:<12}\t{}\t{}\n", lv, gettime(), "Empty data...?");
 
 	if (is_async_)
-		write_async(str);
+		write_async(msg);
 	else
-		write_sync(str);
+		write_sync(msg);
 }
 
 void project::Log::write_async(std::string& data)

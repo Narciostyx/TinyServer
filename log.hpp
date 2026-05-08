@@ -64,11 +64,11 @@ namespace project
 								cnt = 0;
 							}
 						}
-                    else
-						::usleep(kSleepTime * 1000);
+						else
+							::usleep(kSleepTime * 1000);
 					}
 					else
-                     ::usleep(kSleepTime * 1000);
+						::usleep(kSleepTime * 1000);
 				}
 			};
       Thread write_t_;
@@ -81,14 +81,14 @@ namespace project
 			run_ = false;
             if (is_async_ && write_t_.joinable())
 				write_t_.join();
-			while (!reach_full_ || !queue_->empty())
+			while (!queue_->empty())
 			{
 				std::optional result = queue_->pop();
 				if (result.has_value())
 					file_ << result.value();
 			}
 			file_ << "[StartInfo]\tThe program exits with code " << exit_code << ".\n";
-			file_ << "[StartInfo]\tLog closed.\n";
+			file_ << "[StartInfo]\tLog closed.";
 			file_.flush();
 			file_.close();
 			delete queue_;
@@ -106,5 +106,6 @@ inline void logInit(bool flag, int buffer_size, int queue_size, long row_max, st
 #define LOG_INFO(str) project::Log::getInstance().write_log(0,str)
 #define LOG_WARN(str) project::Log::getInstance().write_log(1,str)
 #define LOG_ERR(str) project::Log::getInstance().write_log(2,str)
+
 
 #endif
