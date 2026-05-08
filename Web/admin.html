@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>后台管理</title>
+    <link rel="stylesheet" href="css/style.css">
+    <style>
+        body { align-items: flex-start; padding-top: 20px; }
+        .nav { text-align: right; margin-bottom: 20px; }
+        .admin-panel {
+            background: #fff;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+    </style>
+</head>
+<body>
+    <div class="article-container">
+        <div class="nav" id="navArea">
+            <a href="list.html">返回文章列表</a> | <a href="#" onclick="logout()">退出</a>
+        </div>
+
+        <h1>管理中心</h1>
+        <div class="admin-panel" id="adminContent">
+            <h2>功能开发中...</h2>
+            <p>这里将用于管理员审核评论、发布文章或管理用户。</p>
+            <p>如果后续你的 TinyServer 添加了对应的接口，前端可以写在这里。</p>
+        </div>
+    </div>
+
+    <script src="js/api.js"></script>
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            const token = localStorage.getItem('token');
+            if (!token) {
+                alert('您无权访问管理员界面，请先登录！');
+                window.location.href = 'index.html';
+            }
+        });
+        
+        function logout() {
+            localStorage.removeItem('token');
+            localStorage.removeItem('username');
+            window.location.href = 'index.html';
+        }
+    </script>
+</body>
+</html>

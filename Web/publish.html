@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>发布文章 - 交流平台</title>
+    <link rel="stylesheet" href="css/style.css">
+    <style>
+        body { align-items: flex-start; padding-top: 20px; }
+        .nav { text-align: right; margin-bottom: 20px; }
+        .publish-panel {
+            background: #fff;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        .form-group label {
+            font-weight: bold;
+            margin-bottom: 8px;
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <div class="article-container">
+        <div class="nav">
+            <a href="list.html">返回文章列表</a>
+        </div>
+
+        <h1>发布新文章</h1>
+        <div class="publish-panel">
+            <div id="publishMessage" style="text-align: center; margin-bottom: 15px; display: none;"></div>
+            <form id="publishForm">
+                <div class="form-group">
+                    <label for="title">文章标题</label>
+                    <input type="text" id="title" name="title" required placeholder="请输入文章标题">
+                </div>
+                <div class="form-group">
+                    <label for="content">文章内容 (支持HTML)</label>
+                    <textarea id="content" name="content" rows="10" required placeholder="请输入文章正文内容..."></textarea>
+                </div>
+                <button type="submit">创建并发布</button>
+            </form>
+        </div>
+    </div>
+
+    <script src="js/api.js"></script>
+    <script src="js/publish.js"></script>
+</body>
+</html>
