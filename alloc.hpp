@@ -4,6 +4,7 @@
 namespace project
 {
 	//自定义线性内存分配器
+	//废弃
 	template<typename T>
 	class CustomizedAllocator
 	{
