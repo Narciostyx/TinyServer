@@ -201,15 +201,15 @@ void project::ConnPool::destroy()
 	mutex_.unlock();
 }
 
-std::string project::ConnPool::escapeString(const std::string& str) {
-	MYSQL* conn = getConnection();
-	if (!conn) {
-		LOG_ERR("Failed to get connection for string escaping.");
-		return "";
-	}
-	std::vector<char> buffer((str.length() * 2) + 1);
-	mysql_real_escape_string(conn, buffer.data(), str.c_str(), str.length());
-	std::string esc_str(buffer.data());
-	releaseConnection(conn);
-	return esc_str;
-}
+//std::string project::ConnPool::escapeString(const std::string& str) {
+//	MYSQL* conn = getConnection();
+//	if (!conn) {
+//		LOG_ERR("Failed to get connection for string escaping.");
+//		return "";
+//	}
+//	std::vector<char> buffer((str.length() * 2) + 1);
+//	mysql_real_escape_string(conn, buffer.data(), str.c_str(), str.length());
+//	std::string esc_str(buffer.data());
+//	releaseConnection(conn);
+//	return esc_str;
+//}
