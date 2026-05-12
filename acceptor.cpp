@@ -36,6 +36,7 @@ int project::Acceptor::get_fd() const {
 int project::Acceptor::accept() {
     sockaddr_in client;
     socklen_t client_len = sizeof(client);
+    bzero(&client, sizeof(client));
     char ip[INET_ADDRSTRLEN];
 
     int fd = ::accept(listen_fd_, (sockaddr*)&client, &client_len);
