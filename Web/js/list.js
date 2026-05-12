@@ -28,14 +28,18 @@ async function loadArticleList() {
         const data = await api.getArticles();
         if (data && data.length > 0) {
             listContainer.innerHTML = data.map(article => `
-                <div class="article-item">
-                    <h2><a href="article.html?id=${article.id}">${escapeHtml(article.title)}</a></h2>
-                    <div class="article-meta">
-                        <span>✍️ ${article.author || '佚名'}</span>
-                        <span>📅 ${article.publishTime || '未知'}</span>
-                    </div>
-                </div>
-            `).join('');
+    <div class="article-item">
+        <h2><a href="article.html?id=${article.id}">${escapeHtml(article.title)}</a></h2>
+        <div class="article-meta">
+            <span>✍️ ${article.author || '佚名'}</span>
+            <span>📅 ${article.publishTime || '未知'}</span>
+        </div>
+        <div style="display: flex; justify-content: flex-end; gap: 16px; margin-top: 12px; font-size: 0.85rem; color: #4b5563;">
+            <span>❤️ ${article.likes || 0}</span>
+            <span>👁️ ${article.views || 0}</span>
+        </div>
+    </div>
+`).join('');
         } else {
             listContainer.innerHTML = '<p>📭 暂无文章，去发布一篇吧～</p>';
         }
@@ -52,7 +56,7 @@ async function loadArticleList() {
 
 function escapeHtml(str) {
     if (!str) return '';
-    return str.replace(/[&<>]/g, function(m) {
+    return str.replace(/[&<>]/g, function (m) {
         if (m === '&') return '&amp;';
         if (m === '<') return '&lt;';
         if (m === '>') return '&gt;';

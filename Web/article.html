@@ -1,27 +1,40 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>文章详情 - 交流平台</title>
     <link rel="stylesheet" href="css/style.css">
 </head>
+
 <body>
     <div class="article-container">
-        <div class="nav" id="navArea">
-            <!-- 动态显示登录/用户信息 -->
-        </div>
+        <div class="nav" id="navArea"></div>
 
         <h1 id="articleTitle">加载中...</h1>
+        <!-- 新增：文章操作按钮区域 -->
+        <div class="article-stats"
+            style="display: flex; justify-content: flex-end; gap: 24px; align-items: center; margin: 10px 0 20px 0;">
+            <div id="likeArea">
+                <button id="likeBtn"
+                    style="background: none; border: none; cursor: pointer; font-size: 1.2rem; width: auto; padding: 5px 12px; display: inline-flex; align-items: center; gap: 6px;">
+                    ❤️ <span id="likeCount">0</span>
+                </button>
+            </div>
+            <div id="viewArea">
+                👁️ <span id="viewCount">0</span> 次阅读
+            </div>
+        </div>
+        <div id="articleActions" style="display: flex; gap: 12px; margin: 15px 0 20px 0;"></div>
+
+
         <div id="articleContent">正在加载文章内容...</div>
 
         <div class="comment-section">
             <h2>💬 评论区</h2>
-            <div id="commentsList">
-                <!-- 评论列表 -->
-            </div>
-            
-            <div style="margin-top: 20px;" id="commentFormArea">
+            <div id="commentsList"></div>
+            <div id="commentFormArea">
                 <h3>📝 发表评论</h3>
                 <div id="commentMessage" style="margin-bottom: 15px; display: none;"></div>
                 <form id="commentForm">
@@ -37,4 +50,5 @@
     <script src="js/api.js"></script>
     <script src="js/article.js"></script>
 </body>
+
 </html>

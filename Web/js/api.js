@@ -32,7 +32,7 @@ async function apiFetch(endpoint, options = {}) {
 
     try {
         const response = await fetch(`${API_BASE_URL}${endpoint}`, options);
-        
+
         // 3. 统一错误处理: 当 HTTP 状态码非 2xx 时
         if (!response.ok) {
             let errorMessage = `HTTP Error ${response.status}`;
@@ -44,7 +44,7 @@ async function apiFetch(endpoint, options = {}) {
             }
             throw new Error(errorMessage);
         }
-        
+
         // 应对 204 No Content 或空响应体避免解析导致的报错
         const text = await response.text();
         return text ? JSON.parse(text) : {};
@@ -59,32 +59,43 @@ async function apiFetch(endpoint, options = {}) {
  */
 const api = {
     // 1. 认证相关
-    login: (username, password) => 
+    login: (username, password) =>
         apiFetch('/login', { method: 'POST', body: JSON.stringify({ username, password }) }),
 
     // 2. 文章相关
-    getArticles: () => 
+    getArticles: () =>
         apiFetch('/articles', { method: 'GET' }),
-    
-    getArticleById: (id) => 
+
+    getArticleById: (id) =>
         apiFetch(`/articles/${id}`, { method: 'GET' }),
-    
-    createArticle: (title, content) => 
+
+    // 点赞/取消点赞文章（toggle）
+    likeArticle: (id) =>
+        apiFetch(`/articles/${id}/like`, { method: 'POST' }),
+
+    // 增加文章浏览量
+    incrementView: (id) =>
+        apiFetch(`/articles/${id}/view`, { method: 'POST' }),
+
+    createArticle: (title, content) =>
         apiFetch('/articles', { method: 'POST', body: JSON.stringify({ title, content }) }),
-        
-    updateArticle: (id, title, content) => 
+
+    updateArticle: (id, title, content) =>
         apiFetch(`/articles/${id}`, { method: 'PUT', body: JSON.stringify({ title, content }) }),
-        
-    patchArticle: (id, data) => 
+
+    patchArticle: (id, data) =>
         apiFetch(`/articles/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
-        
-    deleteArticle: (id) => 
+
+    deleteArticle: (id) =>
         apiFetch(`/articles/${id}`, { method: 'DELETE' }),
 
     // 3. 评论相关
-    getComments: (articleId) => 
+    getComments: (articleId) =>
         apiFetch(`/comments?articleId=${articleId}`, { method: 'GET' }),
-        
-    postComment: (articleId, content) => 
-        apiFetch('/comments', { method: 'POST', body: JSON.stringify({ articleId, content }) })
+
+    postComment: (articleId, content) =>
+        apiFetch('/comments', { method: 'POST', body: JSON.stringify({ articleId, content }) }),
+
+    deleteComment: (commentId) =>
+        apiFetch(`/comments/${commentId}`, { method: 'DELETE' })
 };
