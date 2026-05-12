@@ -6,6 +6,8 @@
 #include <boost/beast/http.hpp>
 #include <mysql/mysql.h>
 
+#include "connectionpool.hpp"
+
 namespace project {
     using RouteHandler = std::function<void(boost::beast::http::request<boost::beast::http::string_body>&, boost::beast::http::response<boost::beast::http::string_body>&)>;
 
@@ -24,9 +26,15 @@ namespace project {
 
         void init_routes();
         bool db_query(const std::string& sql, std::function<void(MYSQL_RES*)>&& callback) noexcept;
-        bool db_execute(const std::string& sql, std::function<void(long)>&& callback) noexcept;
+        //bool db_execute(const std::string& sql, std::function<void(long)>&& callback) noexcept;
+
+        template<typename... Args>
+        bool db_stmt_rw(const std::string& sql, std::function<void(void*)>&& callback, Args... args)
+        {
+            return ConnPool::getInstance().stmt_rw_execute(sql, callback, args...);
+        }
 
         // SQL 注入转义工具函数
-        std::string escape_sql_string(const std::string& input);
+        //std::string escape_sql_string(const std::string& input);
     };
 }
