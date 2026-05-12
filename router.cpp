@@ -215,7 +215,7 @@ namespace project {
                 //std::string content = escape_sql_string(obj.at("content").as_string().c_str());
 
                 long affected = 0;
-                db_stmt_rw("INSERT INTO article (title, content, user_id,create_time) VALUES (?,?,?,NOW())", [&](void* arg)
+                db_stmt_rw("INSERT INTO article (title, content, user_id,create_time,likes,views) VALUES (?,?,?,NOW(),0,0)", [&](void* arg)
                     {
                         affected = *(long*)arg;
                     }, title, content, std::to_string(user_id));
