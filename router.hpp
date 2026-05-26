@@ -4,15 +4,14 @@
 #include <string_view>
 #include <functional>
 #include <boost/beast/http.hpp>
-#include <mysql/mysql.h>
-
-#include "connectionpool.hpp"
+#include "service.hpp"
 
 namespace project {
     using RouteHandler = std::function<void(boost::beast::http::request<boost::beast::http::string_body>&, boost::beast::http::response<boost::beast::http::string_body>&)>;
 
     class Router {
     public:
+        const std::string::size_type kContentLength = 8172, kTitleLength = 255, kPasswordLengthMAX = 20, kPasswordLengthMIN = 8, kUsernameLengthMAX = 15, kUsernameLengthMIN = 1;
         Router();
 
         void handle_request(boost::beast::http::request<boost::beast::http::string_body>& req, boost::beast::http::response<boost::beast::http::string_body>& resp);
@@ -23,18 +22,8 @@ namespace project {
         std::unordered_map<std::string_view, RouteHandler> put_routes_;
         std::unordered_map<std::string_view, RouteHandler> patch_routes_;
         std::unordered_map<std::string_view, RouteHandler> delete_routes_;
+        DataService service_;
 
         void init_routes();
-        bool db_query(const std::string& sql, std::function<void(MYSQL_RES*)>&& callback) noexcept;
-        //bool db_execute(const std::string& sql, std::function<void(long)>&& callback) noexcept;
-
-        template<typename... Args>
-        bool db_stmt_rw(const std::string& sql, std::function<void(void*)>&& callback, Args... args)
-        {
-            return ConnPool::getInstance().stmt_rw_execute(sql, callback, args...);
-        }
-
-        // SQL 注入转义工具函数
-        //std::string escape_sql_string(const std::string& input);
     };
 }
