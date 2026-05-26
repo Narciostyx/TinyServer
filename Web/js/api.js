@@ -62,6 +62,9 @@ const api = {
     login: (username, password) =>
         apiFetch('/login', { method: 'POST', body: JSON.stringify({ username, password }) }),
 
+    getUserStats: () =>
+        apiFetch('/user/stats', { method: 'GET' }),
+
     // 2. 文章相关
     getArticles: () =>
         apiFetch('/articles', { method: 'GET' }),

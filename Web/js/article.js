@@ -1,5 +1,6 @@
 let currentArticleId = null;
 let currentUserLiked = false;
+let currentArticleAuthor = null;
 
 document.addEventListener('DOMContentLoaded', () => {
     checkLoginStatus();
@@ -88,9 +89,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
 function checkLoginStatus() {
     const username = localStorage.getItem('username');
+    const userRole = localStorage.getItem('role');
     const navArea = document.getElementById('navArea');
     if (username) {
-        navArea.innerHTML = `<span>👋 欢迎, ${username}</span> | <a href="list.html">📋 返回列表</a> | <a href="admin.html">⚙️ 管理</a> | <a href="#" onclick="logout()">🚪 退出</a>`;
+        const adminLink = userRole === 'admin' ? ` | <a href="admin.html">⚙️ 管理</a>` : '';
+        navArea.innerHTML = `<span>👋 欢迎, ${username}</span> | <a href="list.html">📋 返回列表</a>${adminLink} | <a href="#" onclick="logout()">🚪 退出</a>`;
     } else {
         navArea.innerHTML = `<a href="list.html">📋 返回列表</a> | <a href="index.html">🔑 去登录</a>`;
     }
@@ -99,6 +102,7 @@ function checkLoginStatus() {
 function logout() {
     localStorage.removeItem('token');
     localStorage.removeItem('username');
+    localStorage.removeItem('role');
     window.location.reload();
 }
 
@@ -114,7 +118,8 @@ async function loadArticle() {
         // 2. 获取文章详情（包含 likes, views, userLiked）
         const data = await api.getArticleById(articleId);
         document.getElementById('articleTitle').innerText = data.title || '示例文章';
-        document.getElementById('articleContent').innerHTML = data.content || '<p>文章内容加载失败。</p>';
+        const formattedContent = data.content ? data.content.replace(/\n/g, '<br>') : '<p>文章内容加载失败。</p>';
+        document.getElementById('articleContent').innerHTML = formattedContent;
 
         // 更新作者信息用于删除/编辑权限（原有逻辑）
         currentArticleAuthor = data.author;
@@ -184,10 +189,11 @@ async function loadComments() {
                 const deleteButton = canDelete 
                     ? `<button class="delete-comment-btn" data-comment-id="${comment.id}" style="background:#f87171; padding:4px 12px; font-size:0.8rem; width:auto; margin-left:12px;">删除</button>`
                     : '';
+                const formattedComment = escapeHtml(comment.content).replace(/\n/g, '<br>');
                 return `
                     <div class="comment" data-comment-id="${comment.id}">
                         <div class="comment-author">${escapeHtml(comment.author || '匿名')}</div>
-                        <div class="comment-text">${escapeHtml(comment.content)}</div>
+                        <div class="comment-text">${formattedComment}</div>
                         <div style="display:flex; justify-content:flex-end; margin-top:8px;">${deleteButton}</div>
                     </div>
                 `;
