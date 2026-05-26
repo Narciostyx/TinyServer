@@ -86,6 +86,8 @@ void project::Log::write_log(int level, const std::string& data)
 	case ERROR:
 		lv = "[ERROR]";
 		break;
+	case DEBUG:
+		lv = "[DEBUG]";
 	default:
 		lv = "[UNEXPECTED]";
 		break;

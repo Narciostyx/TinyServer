@@ -71,9 +71,9 @@ namespace project
 						::usleep(kSleepTime * 1000);
 				}
 			};
-      Thread write_t_;
+		Thread write_t_;
 
-		enum kLevel :int { INFO = 0, WARNING, ERROR };
+		enum kLevel :int { INFO = 0, WARNING, ERROR, DEBUG };
 
 		Log() {}
 		~Log()
@@ -107,5 +107,10 @@ inline void logInit(bool flag, int buffer_size, int queue_size, long row_max, st
 #define LOG_WARN(str) project::Log::getInstance().write_log(1,str)
 #define LOG_ERR(str) project::Log::getInstance().write_log(2,str)
 
+#ifdef _DEBUG
+#define LOG_DEBUG(str) project::Log::getInstance().write_log(3,str)
+#else
+#define LOG_DEBUG(str)
+#endif
 
 #endif
