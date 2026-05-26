@@ -13,7 +13,7 @@ namespace project {
     // Acceptor类：负责监听端口并接受新连接
     class Acceptor {
     public:
-        Acceptor(int port);
+        Acceptor(unsigned short int port);
         ~Acceptor();
 
         int get_fd() const;      // 获取监听socket fd

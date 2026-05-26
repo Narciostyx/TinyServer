@@ -1,7 +1,7 @@
 #include "acceptor.hpp"
 
 // 构造函数：创建监听socket并绑定端口
-project::Acceptor::Acceptor(int port) {
+project::Acceptor::Acceptor(unsigned short int port) {
     listen_fd_ = socket(AF_INET, SOCK_STREAM, 0);
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
