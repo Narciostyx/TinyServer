@@ -6,25 +6,122 @@
 #include <unordered_map>
 #include <chrono>
 #include <cctype>
+#include <ctime>
+#include <jwt.h>
+
+#include "metrics.hpp"
 
 namespace json = boost::json;
 
 namespace project {
-    Router::Router() {
+    Router::Router() : Router(Config{}) {}
+
+    Router::Router(const Config& cfg) : config_(cfg) {
+        jwt_secret_ = config_.jwt_secret;
+        jwt_access_exp_seconds_ = config_.jwt_access_exp_seconds;
+        jwt_refresh_exp_seconds_ = config_.jwt_refresh_exp_seconds;
         init_routes();
     }
 
-    // 简单检查用户登录认证
-    static long check_auth_and_get_user_id(auto& req, auto& resp) {
+    //认证请求体
+    struct AuthContext {
+        long user_id = 0;
+        std::string role;
+        bool is_refresh = false;
+    };
+
+    //获取token值
+    static bool extract_token(const boost::beast::http::request<boost::beast::http::string_body>& req, std::string& out) {
         auto auth_it = req.find(boost::beast::http::field::authorization);
-        if (auth_it == req.end() || !auth_it->value().starts_with("Bearer ")) {
-            return 0;
+        if (auth_it == req.end()) {
+            return false;
         }
-        std::string tokenStr = auth_it->value().substr(7);
-        if (tokenStr.find("mock_token_user_") == 0) {
-            return std::atol(tokenStr.substr(16).c_str());
+        auto val = auth_it->value();
+        if (!val.starts_with("Bearer ")) {
+            return false;
         }
-        return 0;
+        out.assign(val.substr(7).data(), val.substr(7).size());
+        return !out.empty();
+    }
+
+    //授权认证与获取认证体内容
+    static bool check_auth_and_get_context(const boost::beast::http::request<boost::beast::http::string_body>& req,
+                                           const std::string& secret,
+                                           AuthContext& ctx,
+                                           bool allow_refresh = false,
+                                           std::string* err = nullptr) {
+        std::string token;
+        if (!extract_token(req, token)) {
+            if (err) *err = "Missing token";
+            return false;
+        }
+
+        jwt_t* jwt = nullptr;
+        if (jwt_decode(&jwt, token.c_str(), (const unsigned char*)secret.data(), secret.size())) {
+            if (err) *err = "Invalid token";
+            return false;
+        }
+
+        auto type = jwt_get_grant(jwt, "type");
+        ctx.is_refresh = type && std::string(type) == "refresh";
+
+        long long exp = jwt_get_grant_int(jwt, "exp");
+        if (exp > 0 && std::time(nullptr) >= exp) {
+            jwt_free(jwt);
+            if (err) *err = "Token expired";
+            return false;
+        }
+
+        if (ctx.is_refresh && !allow_refresh) {
+            jwt_free(jwt);
+            if (err) *err = "Invalid token type";
+            return false;
+        }
+
+        auto role = jwt_get_grant(jwt, "role");
+        if (role) {
+            ctx.role = role;
+        }
+
+        long uid = 0;
+        auto user_id = jwt_get_grant(jwt, "user_id");
+        if (user_id) {
+            try {
+                uid = std::stol(user_id);
+            }
+            catch (...) {
+                uid = 0;
+            }
+        }
+
+        ctx.user_id = uid;
+        jwt_free(jwt);
+        if (ctx.user_id <= 0) {
+            if (err) *err = "Invalid user";
+            return false;
+        }
+        return true;
+    }
+
+    //生成jwt令牌
+    static std::string build_jwt_token(const std::string& secret, long exp_seconds, long user_id, const std::string& role, const std::string& type) {
+        jwt_t* jwt = nullptr;
+        if (jwt_new(&jwt) != 0) {
+            return {};
+        }
+        jwt_add_grant_int(jwt, "user_id", user_id);
+        jwt_add_grant(jwt, "role", role.c_str());
+        jwt_add_grant(jwt, "type", type.c_str());
+        jwt_add_grant_int(jwt, "exp", static_cast<long>(std::time(nullptr) + exp_seconds));
+        jwt_set_alg(jwt, JWT_ALG_HS256, (const unsigned char*)secret.data(), secret.size());
+
+        char* out = jwt_encode_str(jwt);
+        std::string token = out ? out : "";
+        if (out) {
+            jwt_free_str(out);
+        }
+        jwt_free(jwt);
+        return token;
     }
 
     // 返回错误信息json
@@ -35,6 +132,7 @@ namespace project {
         resp.body() = json::serialize(err_obj);
     }
 
+    //辅助校验函数
     static bool is_numeric(std::string_view s) {
         if (s.empty()) return false;
         for (unsigned char ch : s) {
@@ -43,6 +141,7 @@ namespace project {
         return true;
     }
 
+    //获取用户内容
     static std::string get_client_key(const boost::beast::http::request<boost::beast::http::string_body>& req) {
         auto it = req.find("X-Forwarded-For");
         if (it != req.end() && !it->value().empty())
@@ -107,8 +206,13 @@ namespace project {
 
                 if (valid) {
                     json::object res_obj;
-                    res_obj["token"] = "mock_token_user_" + std::to_string(user_id);
-                    res_obj["role"] = admin ? "admin" : "false";
+                    std::string role = admin ? "admin" : "user";
+                    std::string access_token = build_jwt_token(jwt_secret_, jwt_access_exp_seconds_, user_id, role, "access");
+                    std::string refresh_token = build_jwt_token(jwt_secret_, jwt_refresh_exp_seconds_, user_id, role, "refresh");
+                    res_obj["accessToken"] = access_token;
+                    res_obj["refreshToken"] = refresh_token;
+                    res_obj["role"] = role;
+                    res_obj["expiresIn"] = jwt_access_exp_seconds_;
                     resp.result(boost::beast::http::status::ok);
                     resp.body() = json::serialize(res_obj);
                 } else {
@@ -119,12 +223,31 @@ namespace project {
             }
         };
 
+        // POST /api/refresh
+        post_routes_["/refresh"] = [this](auto& req, auto& resp) {
+            resp.set(boost::beast::http::field::content_type, "application/json");
+            AuthContext auth;
+            if (!check_auth_and_get_context(req, jwt_secret_, auth) || !auth.is_refresh) {
+                return set_json_err(resp, boost::beast::http::status::unauthorized, "Unauthorized");
+            }
+
+            std::string access_token = build_jwt_token(jwt_secret_, jwt_access_exp_seconds_, auth.user_id, auth.role, "access");
+            json::object res_obj;
+            res_obj["accessToken"] = access_token;
+            res_obj["expiresIn"] = jwt_access_exp_seconds_;
+            resp.result(boost::beast::http::status::ok);
+            resp.body() = json::serialize(res_obj);
+        };
+
         // 发表评论
         // POST /api/comments
         post_routes_["/comments"] = [this](auto& req, auto& resp) {
             resp.set(boost::beast::http::field::content_type, "application/json");
-            long user_id = check_auth_and_get_user_id(req, resp);
-            if (!user_id) return set_json_err(resp, boost::beast::http::status::unauthorized, "Unauthorized");
+            AuthContext auth;
+            if (!check_auth_and_get_context(req, jwt_secret_, auth, false)) {
+                return set_json_err(resp, boost::beast::http::status::unauthorized, "Unauthorized");
+            }
+            long user_id = auth.user_id;
 
             try {
                 json::value jv = json::parse(req.body());
@@ -163,8 +286,11 @@ namespace project {
         // POST /api/articles
         post_routes_["/articles"] = [this](auto& req, auto& resp) {
             resp.set(boost::beast::http::field::content_type, "application/json");
-            long user_id = check_auth_and_get_user_id(req, resp);
-            if (!user_id) return set_json_err(resp, boost::beast::http::status::unauthorized, "Unauthorized");
+            AuthContext auth;
+            if (!check_auth_and_get_context(req, jwt_secret_, auth, false)) {
+                return set_json_err(resp, boost::beast::http::status::unauthorized, "Unauthorized");
+            }
+            long user_id = auth.user_id;
 
             try {
                 json::value jv = json::parse(req.body());
@@ -207,6 +333,36 @@ namespace project {
         boost::beast::string_view target_beast = req.target();
         std::string_view target(target_beast.data(), target_beast.size());
 
+        auto is_exact_or_query = [](std::string_view path, std::string_view expected) {
+            return path == expected ||
+                (path.size() > expected.size() && path.starts_with(expected) && path[expected.size()] == '?');
+        };
+
+        if (req.method() == boost::beast::http::verb::get) {
+            if (is_exact_or_query(target, "/metrics")) {
+                resp.result(boost::beast::http::status::ok);
+                resp.set(boost::beast::http::field::content_type, "text/plain; version=0.0.4");
+                resp.body() = MetricsRegistry::instance().render_prometheus();
+                return;
+            }
+
+            if (is_exact_or_query(target, "/healthz/live") || is_exact_or_query(target, "/livez")) {
+                bool up = MetricsRegistry::instance().is_live();
+                resp.result(up ? boost::beast::http::status::ok : boost::beast::http::status::service_unavailable);
+                resp.set(boost::beast::http::field::content_type, "application/json");
+                resp.body() = MetricsRegistry::instance().render_health_json(false);
+                return;
+            }
+
+            if (is_exact_or_query(target, "/healthz/ready") || is_exact_or_query(target, "/readyz")) {
+                bool up = MetricsRegistry::instance().is_ready();
+                resp.result(up ? boost::beast::http::status::ok : boost::beast::http::status::service_unavailable);
+                resp.set(boost::beast::http::field::content_type, "application/json");
+                resp.body() = MetricsRegistry::instance().render_health_json(true);
+                return;
+            }
+        }
+
         std::string_view route_target = target;
 
         if (route_target.rfind("/api", 0) == 0)
@@ -241,7 +397,11 @@ namespace project {
                 else if (std::string id_str = extract_id(route_target, "/articles/"); !id_str.empty()) {
                     // GET /api/articles/{id}
                     //id_str = escape_sql_string(id_str);
-                    long user_id = check_auth_and_get_user_id(req, resp);
+                    long user_id = 0;
+                    AuthContext auth;
+                    if (check_auth_and_get_context(req, jwt_secret_, auth, false)) {
+                        user_id = auth.user_id;
+                    }
                     bool found = false;
                     json::object res_obj;
                     service_.fetch_article_detail(id_str, user_id, res_obj, found);
@@ -278,9 +438,13 @@ namespace project {
                 }
                 else if (route_target.starts_with("/user/stats"))
                 {
-                    long user_id = check_auth_and_get_user_id(req, resp);
+                    AuthContext auth;
+                    if (!check_auth_and_get_context(req, jwt_secret_, auth, false)) {
+                        set_json_err(resp, boost::beast::http::status::unauthorized, "Unauthorized");
+                        break;
+                    }
                     json::object res_obj;
-                    service_.fetch_user_stats(user_id, res_obj);
+                    service_.fetch_user_stats(auth.user_id, res_obj);
                     resp.result(boost::beast::http::status::ok);
                     resp.body() = json::serialize(res_obj);
                 }
@@ -307,11 +471,12 @@ namespace project {
 
                             // 点赞逻辑
                             if (action_sv == "like") {
-                                long user_id = check_auth_and_get_user_id(req, resp);
-                                if (!user_id) {
+                                AuthContext auth;
+                                if (!check_auth_and_get_context(req, jwt_secret_, auth, false)) {
                                     set_json_err(resp, boost::beast::http::status::unauthorized, "Unauthorized");
                                     break;
                                 }
+                                long user_id = auth.user_id;
 
                                 bool article_found = false;
                                 long likes_now = 0;
@@ -377,8 +542,9 @@ namespace project {
 
             case boost::beast::http::verb::put: {
                 if (std::string id_str = extract_id(route_target, "/articles/"); !id_str.empty()) {
-                    long user_id = check_auth_and_get_user_id(req, resp);
-                    if (!user_id) { set_json_err(resp, boost::beast::http::status::unauthorized, "Unauthorized"); break; }
+                    AuthContext auth;
+                    if (!check_auth_and_get_context(req, jwt_secret_, auth, false)) { set_json_err(resp, boost::beast::http::status::unauthorized, "Unauthorized"); break; }
+                    long user_id = auth.user_id;
 
                     try {
                         json::value jv = json::parse(req.body());
@@ -417,8 +583,9 @@ namespace project {
 
             case boost::beast::http::verb::patch: {
                 if (std::string id_str = extract_id(route_target, "/articles/"); !id_str.empty()) {
-                    long user_id = check_auth_and_get_user_id(req, resp);
-                    if (!user_id) { set_json_err(resp, boost::beast::http::status::unauthorized, "Unauthorized"); break; }
+                    AuthContext auth;
+                    if (!check_auth_and_get_context(req, jwt_secret_, auth, false)) { set_json_err(resp, boost::beast::http::status::unauthorized, "Unauthorized"); break; }
+                    long user_id = auth.user_id;
 
                     try {
                         json::value jv = json::parse(req.body());
@@ -472,8 +639,9 @@ namespace project {
 
             case boost::beast::http::verb::delete_: {
                 if (std::string id_str = extract_id(route_target, "/articles/"); !id_str.empty()) {
-                    long user_id = check_auth_and_get_user_id(req, resp);
-                    if (!user_id) { set_json_err(resp, boost::beast::http::status::unauthorized, "Unauthorized"); break; }
+                    AuthContext auth;
+                    if (!check_auth_and_get_context(req, jwt_secret_, auth, false)) { set_json_err(resp, boost::beast::http::status::unauthorized, "Unauthorized"); break; }
+                    long user_id = auth.user_id;
 
                     long affected = 0;
                     service_.delete_article(id_str, user_id, affected);
@@ -487,8 +655,9 @@ namespace project {
                     }
                 }
                 else if (std::string id_str = extract_id(route_target, "/comments/"); !id_str.empty()) {
-                    long user_id = check_auth_and_get_user_id(req, resp);
-                    if (!user_id) { set_json_err(resp, boost::beast::http::status::unauthorized, "Unauthorized"); break; }
+                    AuthContext auth;
+                    if (!check_auth_and_get_context(req, jwt_secret_, auth, false)) { set_json_err(resp, boost::beast::http::status::unauthorized, "Unauthorized"); break; }
+                    long user_id = auth.user_id;
 
                     long affected = 0;
                     service_.delete_comment(id_str, user_id, affected);

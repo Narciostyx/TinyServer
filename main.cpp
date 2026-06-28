@@ -25,7 +25,7 @@ int main(int argc, char* argv[])
     g_server = &server;
 
     if (!server.init())
-        return 1;
+        return -1;
 
     server.start(); // 后续需要让start能因stop而返回，才能“正常退出”
     return 0;

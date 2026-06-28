@@ -51,7 +51,7 @@ void project::Log::init(bool flag, int buffer_size, int queue_size, long row_max
 	if (is_async_)
 	{
 		run_ = true;
-      write_t_.start(worker_func_);
+		write_t_.start(worker_func_);
 	}
 }
 
@@ -88,6 +88,7 @@ void project::Log::write_log(int level, const std::string& data)
 		break;
 	case DEBUG:
 		lv = "[DEBUG]";
+		break;
 	default:
 		lv = "[UNEXPECTED]";
 		break;

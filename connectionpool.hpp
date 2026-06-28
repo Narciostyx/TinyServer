@@ -56,35 +56,35 @@ namespace project
 			return true;
 		}
 
-		// 写操作接口：用于INSERT/UPDATE/DELETE等，不返回结果集，参数2为影响行数回调
-		//template<typename Func>
-		//	requires std::invocable<Func, long>
-		//bool execute(const std::string& sql, Func callback) noexcept
-		//{
-		//	MYSQL* conn = getConnection();
-		//	if (!conn)
-		//	{
-		//		LOG_ERR("Failed to get the connection.");
-		//		return false;
-		//	}
+		 /*写操作接口：用于INSERT / UPDATE / DELETE等，不返回结果集，参数2为影响行数回调
+		template<typename Func>
+			requires std::invocable<Func, long>
+		bool execute(const std::string& sql, Func callback) noexcept
+		{
+			MYSQL* conn = getConnection();
+			if (!conn)
+			{
+				LOG_ERR("Failed to get the connection.");
+				return false;
+			}
 
-		//	if (mysql_query(conn, sql.c_str()))
-		//	{
-		//		LOG_ERR(mysql_error(conn));
-		//		releaseConnection(conn);
-		//		return false;
-		//	}
+			if (mysql_query(conn, sql.c_str()))
+			{
+				LOG_ERR(mysql_error(conn));
+				releaseConnection(conn);
+				return false;
+			}
 
-		//	long affected = (long)mysql_affected_rows(conn);
-		//	callback(affected);
-		//	releaseConnection(conn);
-		//	return true;
-		//}
+			long affected = (long)mysql_affected_rows(conn);
+			callback(affected);
+			releaseConnection(conn);
+			return true;
+		}*/
 
 		//读接口，使用预处理语句
 		template<typename Func, typename... Args>
 			requires std::invocable<Func, void*>
-		bool stmt_rw_execute(const std::string& sql,Func cb,Args... args) noexcept
+		bool stmt_rw_execute(const std::string& sql,Func cb,Args&&... args) noexcept
 		{
 			MYSQL* conn = getConnection();
 			if (!conn)
@@ -113,25 +113,28 @@ namespace project
 			{
 				auto arg = std::make_tuple(args...);
 				MYSQL_BIND bind[index] = {};
-             std::apply([&bind, this](auto&&... elems) {
+				unsigned long lengths[index] = {};
+				
+				std::apply([&bind, &lengths, this](auto&&... elems) {
 					int idx = 0;
-                   auto bind_one = [this](MYSQL_BIND& b, auto& value)
-					{
-						using T = std::remove_cvref_t<decltype(value)>;
-						b.buffer_type = get_mysql_type<T>();
-						if constexpr (std::is_same_v<T, std::string>)
+					auto bind_one = [this, &lengths](MYSQL_BIND& b,int cur, auto& value)
 						{
-							b.buffer = const_cast<char*>(value.c_str());
-							b.buffer_length = static_cast<unsigned long>(value.size());
-						}
-						else
-						{
-							b.buffer = &value;
-							b.buffer_length = static_cast<unsigned long>(sizeof(value));
-						}
-					};
-
-					((bind_one(bind[idx], elems), ++idx), ...);
+							using T = std::remove_cvref_t<decltype(value)>;
+							b.buffer_type = get_mysql_type<T>();
+							if constexpr (std::is_same_v<T, std::string>)
+							{
+								b.buffer = const_cast<char*>(value.c_str());
+								b.buffer_length = static_cast<unsigned long>(value.size());
+								lengths[cur] = b.buffer_length;
+								b.length = &lengths[cur];
+							}
+							else
+							{
+								b.buffer = &value;
+								b.buffer_length = static_cast<unsigned long>(sizeof(value));
+							}
+						};
+					((bind_one(bind[idx], idx, elems), ++idx), ...);
 					}, arg);
 				if (mysql_stmt_bind_param(stmt, bind))
 				{

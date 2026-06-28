@@ -2,10 +2,11 @@
 #define _THREAD_HPP
 
 #include <pthread.h>
-#include <stdexcept>
 #include <tuple>
 #include <type_traits>
 #include <utility>
+
+#include "error.hpp"
 
 namespace project
 {
@@ -50,7 +51,7 @@ namespace project
 		void start(Func&& func, Args&&... args)
 		{
 			if (started_)
-				throw std::runtime_error("Thread already started.");
+				throw Err("Thread already started.", Thread_wrong);
 
 			using Payload = PayloadImpl<std::decay_t<Func>, std::decay_t<Args>...>;
 			Payload* payload = new Payload(std::forward<Func>(func), std::forward<Args>(args)...);
@@ -59,7 +60,7 @@ namespace project
 			if (rc != 0)
 			{
 				delete payload;
-				throw std::runtime_error("Failed to create thread.");
+				throw Err("Failed to create thread.", Thread_wrong);
 			}
 			started_ = true;
 		}
@@ -119,7 +120,7 @@ namespace project
 			}
 			catch (...)
 			{
-				// swallow exceptions across pthread boundary
+				//吞噬所有异常，实际执行代码可能会抛出异常，若代码本身未处理，这里避免异常穿过当前线程边界，调用std::terminate()
 			}
 			delete payload;
 			return nullptr;

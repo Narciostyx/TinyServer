@@ -40,6 +40,8 @@ namespace project
 		Config cfg_;// 配置
 		int reactor_num_;//子Reactor数量
 		std::atomic<bool> running_{ false };//运行状态
+		// 停止/关机路径具有幂等性保障，第一次调用会触发整个关闭流程
+		std::atomic<bool> stopping_{ false };
 		std::atomic<int> next_sub_{ 0 };
 
 
@@ -49,7 +51,7 @@ namespace project
 		std::vector<std::shared_ptr<SubReactor>> sub_reactors_;//子Reactor指针数组
 		std::vector<Thread> sub_threads_;//子Reactor线程数组
 
-		Router router_;
+		Router router_{ Config{} };
 
 		// 内部读写回调
 		bool on_read(int fd);

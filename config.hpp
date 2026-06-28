@@ -47,18 +47,21 @@ namespace project
 		std::string address, username, passwd, dbname;
 		bool retry;
 		int sub_reactor_num, time_out, max_listening;
+		std::string jwt_secret;
+		long jwt_access_exp_seconds;
+		long jwt_refresh_exp_seconds;
 
 		Config()
 		{
 			port = 8080;
-			sql_num = 150;
-			thread_num = 100;
+			sql_num = 15;
+			thread_num = 10;
 			log_type = 0;
 			log_buffer_size = 1024;
 			log_queue_size = 1024;
 			log_path = "./log/";
 			log_row_max = 50000;
-			log_row_flush = 1;
+			log_row_flush = 200;
 			address = "127.0.0.1";
 			dbport = 3306;
 			username = "webdb";
@@ -68,6 +71,9 @@ namespace project
 			sub_reactor_num = 10;
 			time_out = 600;
 			max_listening = 5000;
+			jwt_secret = "K7gKCq9pMn4xL2vR8wYzF5tJ3hN6sA0dUeBmXcPiOjI=";
+			jwt_access_exp_seconds = 60 * 60 * 24 * 7;
+			jwt_refresh_exp_seconds = 60 * 60 * 24 * 30;
 		}
 		//解析命令行参数
 		void parseArg(int, char* []);
@@ -78,12 +84,17 @@ namespace project
 		{
 			std::cout << "Usage:.\\TinyServer Options\n"
 				<< "Options:\n"
-				<< "	-p, --port	Set the server's port\n"
-				<< "	-l, --logType	Select the pattern of logging, 0(default) is sync and 1 is async.\n"
-				<< "	-s, --sqlNum	Set the maximum value of the connections in sql pool.\n"
-				<< "	-t, --threadNum	Set the maximum value of the threads in thread pool.\n"
-				<< "	-v, --version	Display the version infomation.\n"
-				<< "	-h, --help	Display the help information."
+				<< "\t-p, --port	Set the server's port\n"
+				<< "\t-l, --logType	Select the pattern of logging, 0(default) is sync and 1 is async.\n"
+				<< "\t-s, --sqlNum	Set the maximum value of the connections in sql pool.\n"
+				<< "\t-t, --threadNum	Set the maximum value of the threads in thread pool.\n"
+				<< "\t-v, --version	Display the version information.\n"
+				<< "\t-h, --help	Display the help information.\n"
+				<< "Following are some specific attributions in the configuration file:\n"
+				<< "\tlog_row_max is the maximum lines in a log file.\n"
+				<< "\tlog_row_flush is the frequency of writing into the file which achieves the limit in the async mode.\n"
+				<< "\tsub_reactor_num is the maximum of subReactors running in the reactor mode.\n"
+				<< "\tjwt_secret is the key used in the jwt encryption."
 				<< std::endl;
 		}
 		//打印版本
@@ -92,7 +103,9 @@ namespace project
 		void printInfo()
 		{
 			std::cout << "Port:" << port << "\nlogType:" << ((log_type == 0) ? std::string("sync\n") : std::string("async\n"))
-				<< "Maximum database connections:" << sql_num << "\nMaximum threads:" << thread_num
+				<< "Maximum database connections:" << sql_num << "\nMaximum threads in threadpool:" << thread_num << "\nMaximum subReactor:" << sub_reactor_num
+				<< "\nTotal " << std::to_string(thread_num + sub_reactor_num + ((log_type == 0) ? 0 : 1) + 1)
+				<< " threads will be running."
 				<< std::endl;
 		}
 		void loadConfigFromFile()
@@ -138,7 +151,10 @@ namespace project
 							<< "\nDB_dbname " << dbname
 							<< "\nDB_retry " << (retry ? 1 : 0)
 							<< "\nSub_reactor_count " << sub_reactor_num
-							<< "\nTime_out_connection " << time_out;
+							<< "\nTime_out_connection " << time_out
+							<< "\nJwt_secret " << jwt_secret
+							<< "\nJwt_access_exp_seconds " << jwt_access_exp_seconds
+							<< "\nJwt_refresh_exp_seconds " << jwt_refresh_exp_seconds;
 						file.close();
 						return;
 					}
@@ -168,7 +184,10 @@ namespace project
 						<< "\nDB_retry " << (retry ? 1 : 0)
 						<< "\nSub_reactor_count " << sub_reactor_num
 						<< "\nTime_out_connection " << time_out
-						<< "\nMax_listening_connection " << max_listening;
+						<< "\nMax_listening_connection " << max_listening
+						<< "\nJwt_secret " << jwt_secret
+						<< "\nJwt_access_exp_seconds " << jwt_access_exp_seconds
+						<< "\nJwt_refresh_exp_seconds " << jwt_refresh_exp_seconds;
 					file.close();
 					return;
 				}
@@ -294,7 +313,7 @@ namespace project
 					int v = 0;
 					if (!parse_int(val, v) || v <= 0)
 					{
-						std::cout << "Ilegal value for the Log_queue_size in config file.\n";
+						std::cout << "Illegal value for the Log_queue_size in config file.\n";
 						exit(exit_code = -1);
 					}
 					log_queue_size = v;
@@ -308,7 +327,7 @@ namespace project
 					long v = 0;
 					if (!parse_long(val, v) || v <= 0)
 					{
-						std::cout << "Ilegal value for the Log_row_max in config file.\n";
+						std::cout << "IIlegal value for the Log_row_max in config file.\n";
 						exit(exit_code = -1);
 					}
 					log_row_max = v;
@@ -318,7 +337,7 @@ namespace project
 					long v = 0;
 					if (!parse_long(val, v) || v <= 0)
 					{
-						std::cout << "Ilegal value for the Log_row_flush in config file.\n";
+						std::cout << "IIlegal value for the Log_row_flush in config file.\n";
 						exit(exit_code = -1);
 					}
 					log_row_flush = v;
@@ -388,6 +407,30 @@ namespace project
 						exit(exit_code = -1);
 					}
 					max_listening = v;
+				}
+				else if (key == "Jwt_secret")
+				{
+					jwt_secret = val;
+				}
+				else if (key == "Jwt_access_exp_seconds")
+				{
+					long v = 0;
+					if (!parse_long(val, v) || v <= 0)
+					{
+						std::cout << "Ilegal value for the Jwt_access_exp_seconds in config file.\n";
+						exit(exit_code = -1);
+					}
+					jwt_access_exp_seconds = v;
+				}
+				else if (key == "Jwt_refresh_exp_seconds")
+				{
+					long v = 0;
+					if (!parse_long(val, v) || v <= 0)
+					{
+						std::cout << "Ilegal value for the Jwt_refresh_exp_seconds in config file.\n";
+						exit(exit_code = -1);
+					}
+					jwt_refresh_exp_seconds = v;
 				}
 				else
 				{

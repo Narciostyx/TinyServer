@@ -36,6 +36,7 @@ void project::ConnPool::init(std::string address, int port, std::string username
 				--i;
 				continue;
 			}
+			destroy();
 			throw Err("Initialized failed(Initialize MYSQL* failed and exit with code 1).", kErrType::Sql_init);
 		}
 
@@ -49,7 +50,8 @@ void project::ConnPool::init(std::string address, int port, std::string username
 				addr_.c_str(), user_.c_str(), passwd_.c_str(), dbname_.c_str(),
 				port_, 0, 0);
 			if (connected)
-				break;
+				if (!mysql_set_character_set(connected, "utf8mb4"))
+					break;
 
 			const unsigned int err = mysql_errno(conn);
 			LOG_ERR(std::string("Connect failed:") + mysql_error(conn) + ", errno=" + std::to_string(err));
@@ -57,6 +59,7 @@ void project::ConnPool::init(std::string address, int port, std::string username
 			if (!retry_)
 			{
 				mysql_close(conn);
+				destroy();
 				throw Err("Connect failed(won't retry due to the config and exit with code 1).", kErrType::Sql_conn);
 			}
 
@@ -64,6 +67,7 @@ void project::ConnPool::init(std::string address, int port, std::string username
 			if (attempt >= kMaxAttempts)
 			{
 				mysql_close(conn);
+				destroy();
 				throw Err("Connect failed(Reach max retry attempts and exit with code 1).", kErrType::Sql_conn);
 			}
 
@@ -71,6 +75,7 @@ void project::ConnPool::init(std::string address, int port, std::string username
 			if (err == 1045 || err == 1049)
 			{
 				mysql_close(conn);
+				destroy();
 				throw Err("Connect failed(Invalid credentials or database name).", kErrType::Sql_conn);
 			}
 

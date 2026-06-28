@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <functional>
 #include <unistd.h>
+#include <memory>
 
 #include "threadsafe_queue.hpp"
 #include "error.hpp"
@@ -20,6 +21,15 @@ namespace project
 		const int kSleepTime = 10;//线程休眠时间
 	}
 
+	// 抽象的 Logger 接口
+	class ILogger {
+	public:
+		virtual ~ILogger() = default;
+		virtual void init(bool /*async*/, int /*buffer_size*/, int /*queue_size*/, long /*row_max*/, std::string /*path*/, long /*row_flush*/) = 0;
+		virtual void write_log(int level, const std::string& data) = 0;
+	};
+
+	// 现有 Log 实现保留，作为默认适配器后备
 	class Log
 	{
 	public:
@@ -79,7 +89,7 @@ namespace project
 		~Log()
 		{
 			run_ = false;
-            if (is_async_ && write_t_.joinable())
+			if (is_async_ && write_t_.joinable())
 				write_t_.join();
 			while (!queue_->empty())
 			{
@@ -98,19 +108,39 @@ namespace project
 		void write_sync(std::string&);
 		std::string gettime();
 	};
+
+	// 适配器：将现有 Log 封装为 ILogger
+	class DefaultLoggerAdapter : public ILogger {
+	public:
+		void init(bool a, int b, int c, long d, std::string e, long f) override { Log::getInstance().init(a,b,c,d,e,f); }
+		void write_log(int level, const std::string& data) override { Log::getInstance().write_log(level, data); }
+	};
+
+	// Logger 管理：全局持有当前 ILogger 实例（默认使用 DefaultLoggerAdapter）
+	namespace LoggerHolder {
+		inline std::shared_ptr<ILogger>& get_logger_ref() {
+			static std::shared_ptr<ILogger> logger = std::make_shared<DefaultLoggerAdapter>();
+			return logger;
+		}
+		inline void set_logger(std::shared_ptr<ILogger> l) { get_logger_ref() = std::move(l); }
+		inline std::shared_ptr<ILogger> get_logger() { return get_logger_ref(); }
+	}
+
+	// 向后兼容的初始化接口
+	inline void logInit(bool flag, int buffer_size, int queue_size, long row_max, std::string path, long row_flush) { LoggerHolder::get_logger()->init(flag, buffer_size, queue_size, row_max, path, row_flush); }
+
+	// 兼容旧宏，但内部透过 ILogger
+	#define LOG_UNEXPECT(str) project::LoggerHolder::get_logger()->write_log(-1,str)
+	#define LOG_INFO(str) project::LoggerHolder::get_logger()->write_log(0,str)
+	#define LOG_WARN(str) project::LoggerHolder::get_logger()->write_log(1,str)
+	#define LOG_ERR(str) project::LoggerHolder::get_logger()->write_log(2,str)
+
+	#ifdef _DEBUG
+	#define LOG_DEBUG(str) project::LoggerHolder::get_logger()->write_log(3,str)
+	#else
+	#define LOG_DEBUG(str)
+	#endif
+
 }
-
-inline void logInit(bool flag, int buffer_size, int queue_size, long row_max, std::string path, long row_flush) { project::Log::getInstance().init(flag, buffer_size, queue_size, row_max, path, row_flush); }
-
-#define LOG_UNEXPECT(str) project::Log::getInstance().write_log(-1,str)
-#define LOG_INFO(str) project::Log::getInstance().write_log(0,str)
-#define LOG_WARN(str) project::Log::getInstance().write_log(1,str)
-#define LOG_ERR(str) project::Log::getInstance().write_log(2,str)
-
-#ifdef _DEBUG
-#define LOG_DEBUG(str) project::Log::getInstance().write_log(3,str)
-#else
-#define LOG_DEBUG(str)
-#endif
 
 #endif

@@ -5,7 +5,9 @@
 
 #include "http.hpp"
 #include "connection.hpp"
+#include "metrics.hpp"
 #include <sstream>
+#include <utility>
 
 namespace project
 {
@@ -13,6 +15,7 @@ namespace project
 	{
 		cfg_.parseArg(argc, argv);
 		reactor_num_ = cfg_.sub_reactor_num;
+		router_ = Router(cfg_);
 	}
 
 	bool Server::init()
@@ -21,12 +24,28 @@ namespace project
 		// 约定：log_type==1 表示异步
 		logInit(cfg_.log_type, cfg_.log_buffer_size, cfg_.log_queue_size, cfg_.log_row_max, cfg_.log_path, cfg_.log_row_flush);
 		LOG_INFO("Server init: log initialized.");
+		MetricsRegistry::instance().set_liveness(true);
+		MetricsRegistry::instance().set_readiness(false);
+
+		// 优化点：支持从环境变量注入 JWT_SECRET，且在启动时强制校验密钥强度（必须 >= 32 字符）
+		// 环境变量优先于配置文件
+		{
+			const char* env_jwt = ::getenv("JWT_SECRET");
+			if (env_jwt && ::strlen(env_jwt) > 0) {
+				cfg_.jwt_secret = std::string(env_jwt);
+				LOG_INFO("JWT secret loaded from environment variable.");
+			}
+
+			if (cfg_.jwt_secret.empty() || cfg_.jwt_secret.size() < 32) {
+				LOG_ERR("JWT secret is empty or too weak (must be >=32 chars). Set JWT_SECRET env or update config.");
+				return false;
+			}
+		}
 
 		// 2) 初始化数据库连接池（这里使用默认参数，最大连接数使用配置）
 		// 说明：项目中`connInit`已提供默认连接信息
 		connInit(cfg_.address, cfg_.dbport, cfg_.username, cfg_.passwd, cfg_.dbname, cfg_.sql_num, cfg_.retry);
 		LOG_INFO("Server init: connection pool initialized.");
-
 
 		try
 		{
@@ -63,6 +82,8 @@ namespace project
 			exit(exit_code = e.getType());
 		}
 		running_ = true;
+		MetricsRegistry::instance().set_readiness(true);
+		MetricsRegistry::instance().log_snapshot("startup");
 		LOG_INFO("Server start.");
 		return true;
 	}
@@ -87,6 +108,7 @@ namespace project
 		}
 
 		conn->append_read_data(buf, n);
+		MetricsRegistry::instance().on_request_started();
 
 		// (2) 闭包投递：确保 std::shared_ptr 在所有路径的安全流转
 		pool_->enqueue([this, conn]() {
@@ -108,7 +130,6 @@ namespace project
 				resp.set(boost::beast::http::field::access_control_allow_origin, "*");
 				resp.set(boost::beast::http::field::access_control_allow_methods, "GET, POST, PUT, DELETE, OPTIONS, FETCH");
 				resp.set(boost::beast::http::field::access_control_allow_headers, "Content-Type, Authorization");
-
 				// (3) HTTP 方法判断与路由处理
 				router_.handle_request(req, resp);
 			}
@@ -119,6 +140,7 @@ namespace project
 			auto out = serialize_http_response(resp);
 			::send(conn->get_fd(), out.c_str(), (int)out.size(), 0);
 			LOG_INFO("Response sent for fd " + std::to_string(conn->get_fd()) + " status: " + std::to_string((unsigned)resp.result_int()));
+			MetricsRegistry::instance().on_request_completed((unsigned)resp.result_int());
 
 			// (6) 关闭连接：增加 Keep-Alive 长标志判定机制
 			bool keep_alive = req.keep_alive();
@@ -169,34 +191,42 @@ namespace project
 	{
 		if (!running_)
 			return;
-
-		// 启动子Reactor线程时，同时绑定用于这些 Reactor 的回调函数逻辑 
+		LOG_INFO("Server start:ready to start the subreactor threads.");
+		// 启动子Reactor线程时，同时绑定这些SubReactor的回调逻辑
 		sub_threads_.clear();
 		sub_threads_.reserve(sub_reactors_.size());
 		for (auto& sr : sub_reactors_)
 		{
-			// 为了能在Reactor底层中应用回调，我们这里可以做一个拦截（更标准的做法应该由Acceptor在新连接进来时自动将回调绑定到FD）
-			// 这里因为SubReactor暴露了set_callbacks，但不知道具体的fd，通常需修改MainReactor或SubReactor内部。
-			// 但因为在当前架构中MainReactor的dispatch_只是将fd赋予了子Reactor并触发add_fd。
-			// 所以我们需要通过另一种方式让所有的新的fd获得handle_read和handle_write。
 			Thread t;
 			t.start([sr]() { sr->loop(); });
 			sub_threads_.push_back(std::move(t));
 		}
 
-		LOG_INFO("Server start: sub reactors running. main reactor entering loop.");
+		LOG_INFO("Server start:sub reactors running.");
+		LOG_INFO("Server start:main reactor starts.");
+		//进入主reactor的循环函数
 		main_reactor_->loop();
+		LOG_INFO("Server running:main reactor loop func exits.");
 
 		// 正常情况下loop不返回；若返回则等待线程
 		for (auto& t : sub_threads_)
 		{
 			if (t.joinable()) t.join();
 		}
+		LOG_INFO("Server running:server is gonna shutdown.");
 	}
 
 	void Server::stop()
 	{
+		// 确保 stop 的幂等性：只有第一次调用会触发关闭流程
+		bool expected = false;
+		if (!stopping_.compare_exchange_strong(expected, true)) {
+			return; // 已经在关闭中
+		}
 		running_ = false;
+		MetricsRegistry::instance().set_readiness(false);
+		MetricsRegistry::instance().set_liveness(false);
+		MetricsRegistry::instance().log_snapshot("shutdown");
 		if (main_reactor_) main_reactor_->stop();
 		for (auto& sr : sub_reactors_) if (sr) sr->stop();
 		LOG_WARN("Server stop requested.");

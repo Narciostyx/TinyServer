@@ -22,7 +22,7 @@ private:
 
 namespace project
 {
-	enum kErrType :int { defaultType = -1, Sql_init, Sql_conn, Reactor_init };
+	enum kErrType :int { defaultType = -1, Sql_init, Sql_conn, Reactor_init, Thread_wrong };
 	inline int exit_code = 0;
 }
 
