@@ -7,12 +7,13 @@
 #include <fstream>
 #include <filesystem>
 #include <functional>
+#include <mutex>
+#include <thread>
 #include <unistd.h>
 #include <memory>
 
 #include "threadsafe_queue.hpp"
 #include "error.hpp"
-#include "thread.hpp"
 
 namespace project
 {
@@ -21,16 +22,16 @@ namespace project
 		const int kSleepTime = 10;//线程休眠时间
 	}
 
-	// 抽象的 Logger 接口
-	class ILogger {
+	// 抽象的Logger基类
+	class Logger {
 	public:
-		virtual ~ILogger() = default;
+		virtual ~Logger() = default;
 		virtual void init(bool /*async*/, int /*buffer_size*/, int /*queue_size*/, long /*row_max*/, std::string /*path*/, long /*row_flush*/) = 0;
 		virtual void write_log(int level, const std::string& data) = 0;
 	};
 
-	// 现有 Log 实现保留，作为默认适配器后备
-	class Log
+	// 继承Logger
+	class Log:public Logger
 	{
 	public:
 		static Log& getInstance()
@@ -46,42 +47,37 @@ namespace project
 	private:
 		using sysclock = std::chrono::system_clock;
 
-		bool is_async_, run_, reach_full_ = false;
+		bool is_async_ = false;
+		std::atomic<bool> run_{ false }; // 供后台写线程与析构线程同步
+		bool reach_full_ = false;
 		std::string file_path_;
-		Mutex mutex_;
+		std::mutex mutex_;
 		//写入文件
 		std::ofstream file_;
 		ThreadSafeQueue<std::string>* queue_;
 		int buffer_size_;
 		long row_flush_, row_max_;
 		std::atomic<long> row_cnt_ = 0;
-		//子线程函数
+		//子线程函数：带 1 秒超时阻塞取队列（有数据立即处理；空闲时低频唤醒，退出信号可及时感知）
 		std::function<void(void)> worker_func_ = [this]
 			{
 				long cnt = 0;
-				while (run_)
+				while (run_.load(std::memory_order_relaxed))
 				{
-					if (!queue_->empty())
+					std::optional result = queue_->popWithTime(1);
+					if (result.has_value())
 					{
-						std::optional result = queue_->pop();
-						if (result.has_value())
+						file_ << result.value();
+						++cnt;
+						if (cnt == row_flush_)
 						{
-							file_ << result.value();
-							++cnt;
-							if (cnt == row_flush_)
-							{
-								file_.flush();
-								cnt = 0;
-							}
+							file_.flush();
+							cnt = 0;
 						}
-						else
-							::usleep(kSleepTime * 1000);
 					}
-					else
-						::usleep(kSleepTime * 1000);
 				}
 			};
-		Thread write_t_;
+		std::thread write_t_; // 异步日志后台写线程（std::thread）
 
 		enum kLevel :int { INFO = 0, WARNING, ERROR, DEBUG };
 
@@ -106,35 +102,29 @@ namespace project
 
 		void write_async(std::string&);
 		void write_sync(std::string&);
+		// 获取当前时间
 		std::string gettime();
 	};
 
-	// 适配器：将现有 Log 封装为 ILogger
-	class DefaultLoggerAdapter : public ILogger {
-	public:
-		void init(bool a, int b, int c, long d, std::string e, long f) override { Log::getInstance().init(a,b,c,d,e,f); }
-		void write_log(int level, const std::string& data) override { Log::getInstance().write_log(level, data); }
-	};
-
-	// Logger 管理：全局持有当前 ILogger 实例（默认使用 DefaultLoggerAdapter）
-	namespace LoggerHolder {
-		inline std::shared_ptr<ILogger>& get_logger_ref() {
-			static std::shared_ptr<ILogger> logger = std::make_shared<DefaultLoggerAdapter>();
+	// Logger 管理：持有抽象基类Logger指针
+	namespace LoggerHolder 
+	{
+		// 当前默认日志类使用Log
+		using DefaultLogger = Log;
+		inline std::shared_ptr<Logger>& get_logger_ref() {
+			// 因为Log设计为单例，不能让shared_ptr对其进行析构，使用空deleter
+			static std::shared_ptr<Logger> logger{ &Log::getInstance(), [](Logger*) {} };
 			return logger;
 		}
-		inline void set_logger(std::shared_ptr<ILogger> l) { get_logger_ref() = std::move(l); }
-		inline std::shared_ptr<ILogger> get_logger() { return get_logger_ref(); }
+		inline void set_logger(std::shared_ptr<Logger> l) { get_logger_ref() = std::move(l); }
+		inline std::shared_ptr<Logger> get_logger() { return get_logger_ref(); }
 	}
 
-	// 向后兼容的初始化接口
-	inline void logInit(bool flag, int buffer_size, int queue_size, long row_max, std::string path, long row_flush) { LoggerHolder::get_logger()->init(flag, buffer_size, queue_size, row_max, path, row_flush); }
-
-	// 兼容旧宏，但内部透过 ILogger
+	#define LOG_INIT(flag, buffer_size,queue_size,row_max,path,row_flush) project::LoggerHolder::get_logger()->init(flag, buffer_size, queue_size, row_max, path, row_flush)
 	#define LOG_UNEXPECT(str) project::LoggerHolder::get_logger()->write_log(-1,str)
 	#define LOG_INFO(str) project::LoggerHolder::get_logger()->write_log(0,str)
 	#define LOG_WARN(str) project::LoggerHolder::get_logger()->write_log(1,str)
 	#define LOG_ERR(str) project::LoggerHolder::get_logger()->write_log(2,str)
-
 	#ifdef _DEBUG
 	#define LOG_DEBUG(str) project::LoggerHolder::get_logger()->write_log(3,str)
 	#else
