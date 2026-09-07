@@ -15,7 +15,7 @@ void project::ConnPool::init(std::string address, int port, std::string username
 	used_size_ = cur_size_ = 0;
 	retry_ = retry;
 
-	LOG_INFO("Start to initialize the connections pool.");
+	LOG_INFO("Start to initialize the connections pool and should have " + std::to_string(max_size_) + " connections.");
 
 	conn_ = new std::list<MYSQL*>;
 	if (!conn_)
@@ -43,6 +43,10 @@ void project::ConnPool::init(std::string address, int port, std::string username
 		// 设置连接超时，避免连接阶段卡住太久
 		unsigned int timeout = 5; // 秒
 		mysql_options(conn, MYSQL_OPT_CONNECT_TIMEOUT, &timeout);
+
+		// 连接前即固定客户端字符集为 utf8mb4（握手阶段生效），
+		// 避免"先以默认字符集交互、后 set_character_set"的首包窗口
+		mysql_options(conn, MYSQL_SET_CHARSET_NAME, "utf8mb4");
 
 		while (true)
 		{
@@ -96,9 +100,10 @@ void project::ConnPool::init(std::string address, int port, std::string username
 		conn_->push_back(connected);
 		++cur_size_;
 	}
+	// 初始化结束
 
-	sem_ = new Sem(cur_size_);
-	LOG_INFO("Initialize ConnPool finished.");
+	sem_ = std::make_unique<std::counting_semaphore<kConnPoolSemMax>>(cur_size_);
+	LOG_INFO("Initialize ConnPool finished with " + std::to_string(cur_size_) + " connections.");
 }
 
 //获取单个连接
@@ -106,7 +111,7 @@ MYSQL* project::ConnPool::getConnection()
 {
 	//当摧毁连接池线程执行时，从此时拒绝获取任何连接
    {
-		LockGuard<> lock(mutex_);
+		std::lock_guard<std::mutex> lock(mutex_);
 		if (prepare_destroy_ || destroy_)
 		{
 			LOG_WARN("Due to ConnPool preparing to destroy, reject the request.");
@@ -117,14 +122,14 @@ MYSQL* project::ConnPool::getConnection()
    // 以信号量作为可用连接计数，先等待再取连接，避免对cur_size_的竞态读取
 	if (!sem_)
 		return nullptr;
-	sem_->wait();
+	sem_->acquire();
 
-	LockGuard<> lock(mutex_);
+	std::lock_guard<std::mutex> lock(mutex_);
 	//如果连接池被摧毁，则返回空指针
     if (prepare_destroy_ || destroy_ || !conn_ || conn_->empty())
 	{
 		// 理论上不应发生；为保证信号量与队列一致，归还一次
-		sem_->post();
+		sem_->release();
 		return nullptr;
 	}
 	MYSQL* conn = conn_->front();
@@ -141,14 +146,14 @@ void project::ConnPool::releaseConnection(MYSQL* conn)
 		return;
    bool need_close = false;
 	{
-		LockGuard<> lock(mutex_);
+		std::lock_guard<std::mutex> lock(mutex_);
 		//线程池摧毁线程执行时，不会放入空闲队列，而是直接关闭连接
 		if (prepare_destroy_ || destroy_ || conn_ == nullptr)
 		{
 			need_close = true;
 			--used_size_;
 			if (used_size_ <= 0)
-				cv_.broadcast();
+				cv_.notify_all();
 		}
 		else
 		{
@@ -156,8 +161,8 @@ void project::ConnPool::releaseConnection(MYSQL* conn)
 			++cur_size_;
 			--used_size_;
 			if (used_size_ <= 0)
-				cv_.broadcast();
-			sem_->post();
+				cv_.notify_all();
+			sem_->release();
 		}
 	}
 	//关闭连接为单个连接句柄传递，不需要加锁
@@ -169,26 +174,22 @@ void project::ConnPool::releaseConnection(MYSQL* conn)
 void project::ConnPool::destroy()
 {
 	LOG_INFO("Prepare to destroy the connection pool.");
-	mutex_.lock();
+	std::unique_lock<std::mutex> lock(mutex_);
 	//避免被多次调用
 	if (destroy_)
-	{
-		mutex_.unlock();
 		return;
-	}
 	prepare_destroy_ = true;
 	destroy_ = true;
 
-	//通知等待getConnection的线程
+	//通知等待getConnection的线程（release 唤醒，等待者醒来后会因 destroy_ 退出并归还计数）
 	if (sem_)
 	{
 		for (int i = 0; i < max_size_; ++i)
-			sem_->post();
+			sem_->release();
 	}
 
-	//等待所有被使用连接释放
-	while (used_size_ > 0)
-		cv_.wait(mutex_.get());
+	//等待所有被使用连接释放（wait 期间自动释放 mutex_，满足条件后重获锁）
+	cv_.wait(lock, [this] { return used_size_ <= 0; });
 
 	LOG_INFO("Execute the destroy function normally.");
 	if (conn_)
@@ -202,8 +203,6 @@ void project::ConnPool::destroy()
 		delete conn_;
 		conn_ = nullptr;
 	}
-
-	mutex_.unlock();
 }
 
 //std::string project::ConnPool::escapeString(const std::string& str) {
