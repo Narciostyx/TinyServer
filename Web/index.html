@@ -8,19 +8,56 @@
 </head>
 <body>
     <div class="container">
-        <h2>🔐 用户登录</h2>
-        <div id="loginMessage" style="color: red; text-align: center; margin-bottom: 15px; display: none;"></div>
-        <form id="loginForm">
-            <div class="form-group">
-                <label for="username">用户名</label>
-                <input type="text" id="username" name="username" required>
-            </div>
-            <div class="form-group">
-                <label for="password">密码</label>
-                <input type="password" id="password" name="password" required>
-            </div>
-            <button type="submit">登录</button>
-        </form>
+        <h2 id="authTitle">🔐 用户登录</h2>
+
+        <!-- 登录面板 -->
+        <div id="loginPanel">
+            <div id="loginMessage" style="color: red; text-align: center; margin-bottom: 15px; display: none;"></div>
+            <form id="loginForm">
+                <div class="form-group">
+                    <label for="username">用户名</label>
+                    <input type="text" id="username" name="username" required>
+                </div>
+                <div class="form-group">
+                    <label for="password">密码</label>
+                    <input type="password" id="password" name="password" required>
+                </div>
+                <button type="submit">登录</button>
+            </form>
+            <p style="text-align: center; margin-top: 20px;">
+                还没有账号？<a href="#" id="showRegisterLink">立即注册</a>
+            </p>
+        </div>
+
+        <!-- 注册面板（默认隐藏） -->
+        <div id="registerPanel" style="display: none;">
+            <div id="registerMessage" style="color: red; text-align: center; margin-bottom: 15px; display: none;"></div>
+            <form id="registerForm">
+                <div class="form-group">
+                    <label for="regUsername">用户名</label>
+                    <input type="text" id="regUsername" name="regUsername" required
+                           placeholder="1~8 个字符，仅字母/数字/中文">
+                </div>
+                <div class="form-group">
+                    <label for="regPassword">密码</label>
+                    <input type="password" id="regPassword" name="regPassword" required
+                           placeholder="8~12 位，须含字母和数字">
+                </div>
+                <div class="form-group">
+                    <label for="regPasswordConfirm">确认密码</label>
+                    <input type="password" id="regPasswordConfirm" name="regPasswordConfirm" required>
+                </div>
+                <p class="rule-tip">
+                    规则：用户名最多 8 个字符（中文一字按 1 字符），仅限字母、数字、中文；
+                    密码 8~12 位且必须同时包含字母与数字；用户名与密码均不允许特殊字符。
+                </p>
+                <button type="submit">注册</button>
+            </form>
+            <p style="text-align: center; margin-top: 20px;">
+                <a href="#" id="backToLoginLink">← 已有账号？返回登录</a>
+            </p>
+        </div>
+
         <p style="text-align: center; margin-top: 20px;">
             <a href="list.html">👀 游客浏览文章列表</a>
         </p>
@@ -28,5 +65,6 @@
 
     <script src="js/api.js"></script>
     <script src="js/login.js"></script>
+    <script src="js/register.js"></script>
 </body>
 </html>

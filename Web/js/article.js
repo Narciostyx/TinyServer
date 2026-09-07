@@ -2,39 +2,43 @@ let currentArticleId = null;
 let currentUserLiked = false;
 let currentArticleAuthor = null;
 
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
     checkLoginStatus();
-    loadArticle();
+    // 先等文章作者信息就绪，再渲染评论：
+    // 删除按钮依赖 currentArticleAuthor 判断"文章作者可删他人评论"，若与 loadComments 并行，
+    // 评论渲染时 currentArticleAuthor 尚未赋值 → 文章作者名下他人评论会缺失删除按钮
+    await loadArticle();
     loadComments();
 
     document.getElementById('likeArea')?.addEventListener('click', async (e) => {
-    const btn = e.target.closest('#likeBtn');
-    if (!btn) return;
-    const token = localStorage.getItem('token');
-    if (!token) {
-        alert('请先登录后点赞');
-        return;
-    }
-    try {
-        // 调用点赞接口，期望后端返回 { likes: number, liked: boolean }
-        const result = await api.likeArticle(currentArticleId);
-        // 更新点赞总数显示
-        const likeCountSpan = document.getElementById('likeCount');
-        likeCountSpan.innerText = result.likes;
-        // 更新当前用户的点赞状态
-        currentUserLiked = result.liked;   // 关键：使用后端返回的 liked 字段
-        // 刷新按钮样式（爱心颜色/图标）
-        updateLikeButtonStyle();
-    } catch (error) {
-        alert('点赞失败：' + error.message);
-    }
-});
+        const btn = e.target.closest('#likeBtn');
+        if (!btn) return;
+        const token = localStorage.getItem('accessToken') || localStorage.getItem('token');
+        if (!token) {
+            alert('请先登录后点赞');
+            return;
+        }
+        try {
+            // 调用点赞接口，期望后端返回 { likes: number, liked: boolean }
+            const result = await api.likeArticle(currentArticleId);
+            // 更新点赞总数显示
+            const likeCountSpan = document.getElementById('likeCount');
+            likeCountSpan.innerText = result.likes;
+            // 更新当前用户的点赞状态
+            currentUserLiked = result.liked;   // 关键：使用后端返回的 liked 字段
+            // 刷新按钮样式（爱心颜色/图标）
+            updateLikeButtonStyle();
+        } catch (error) {
+            alert('点赞失败：' + error.message);
+        }
+    });
 
     document.getElementById('commentForm').addEventListener('submit', async (e) => {
         e.preventDefault();
         
         const commentMessage = document.getElementById('commentMessage');
-        if (!localStorage.getItem('token')) {
+        const token = localStorage.getItem('accessToken') || localStorage.getItem('token');
+        if (!token) {
             commentMessage.style.color = '#b91c1c';
             commentMessage.innerText = '🔐 请先登录后再发表评论！';
             commentMessage.style.display = 'block';
@@ -48,7 +52,7 @@ document.addEventListener('DOMContentLoaded', () => {
         commentMessage.style.display = 'none';
 
         try {
-            await api.postComment(articleId, content);
+            await api.postComment({ articleId, content });
             document.getElementById('commentContent').value = '';
             commentMessage.style.color = '#15803d';
             commentMessage.innerText = '✅ 评论发布成功！';
@@ -62,45 +66,40 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 });
 
-// 绑定点赞按钮事件
-document.addEventListener('DOMContentLoaded', () => {
-    // ... 原有的评论表单等绑定 ...
-
-    // 点赞按钮的委托事件
-    document.getElementById('likeArea')?.addEventListener('click', async (e) => {
-        const btn = e.target.closest('#likeBtn');
-        if (!btn) return;
-        const token = localStorage.getItem('token');
-        if (!token) {
-            alert('请先登录后点赞');
-            return;
-        }
-        try {
-            const result = await api.likeArticle(currentArticleId);
-            // 后端返回最新点赞数和用户点赞状态
-            document.getElementById('likeCount').innerText = result.likes;
-            currentUserLiked = result.liked; // 假设后端返回 liked: true/false
-            updateLikeButtonStyle();
-        } catch (error) {
-            alert('点赞失败：' + error.message);
-        }
-    });
-});
-
 function checkLoginStatus() {
     const username = localStorage.getItem('username');
-    const userRole = localStorage.getItem('role');
     const navArea = document.getElementById('navArea');
     if (username) {
-        const adminLink = userRole === 'admin' ? ` | <a href="admin.html">⚙️ 管理</a>` : '';
-        navArea.innerHTML = `<span>👋 欢迎, ${username}</span> | <a href="list.html">📋 返回列表</a>${adminLink} | <a href="#" onclick="logout()">🚪 退出</a>`;
+        navArea.innerHTML = `
+            <div class="user-info">
+                <div class="user-identity">
+                    <span class="user-avatar">${username.slice(0, 1).toUpperCase()}</span>
+                    <div class="user-text">
+                        <div class="user-name">${username}</div>
+                        <div class="user-meta">在线</div>
+                    </div>
+                </div>
+                <div class="user-links">
+                    <a href="list.html" class="user-link">📋 返回列表</a>
+                    <a href="#" class="user-link danger" onclick="logout()">🚪 退出</a>
+                </div>
+            </div>
+        `;
     } else {
-        navArea.innerHTML = `<a href="list.html">📋 返回列表</a> | <a href="index.html">🔑 去登录</a>`;
+        navArea.innerHTML = `
+            <div class="user-links">
+                <a href="list.html" class="user-link">📋 返回列表</a>
+                <a href="index.html" class="user-link">🔑 去登录</a>
+            </div>
+        `;
     }
 }
 
 function logout() {
     localStorage.removeItem('token');
+    localStorage.removeItem('accessToken');
+    localStorage.removeItem('refreshToken');
+    localStorage.removeItem('tokenExpiresIn');
     localStorage.removeItem('username');
     localStorage.removeItem('role');
     window.location.reload();
@@ -137,8 +136,8 @@ async function loadArticle() {
         const currentUser = localStorage.getItem('username');
         if (currentUser && currentArticleAuthor && currentUser === currentArticleAuthor) {
             actionsDiv.innerHTML = `
-                <button id="editArticleBtn" style="background: #3b82f6;">✏️ 编辑文章</button>
-                <button id="deleteArticleBtn" style="background: #ef4444;">🗑️ 删除文章</button>
+                <button id="editArticleBtn" class="btn-inline btn-blue">✏️ 编辑文章</button>
+                <button id="deleteArticleBtn" class="btn-inline btn-red">🗑️ 删除文章</button>
             `;
             document.getElementById('editArticleBtn').addEventListener('click', () => {
                 window.location.href = `publish.html?edit=${articleId}`;
@@ -187,7 +186,7 @@ async function loadComments() {
                 // 判断是否显示删除按钮：评论作者 或 文章作者
                 const canDelete = (currentUser && (currentUser === comment.author || currentUser === currentArticleAuthor));
                 const deleteButton = canDelete 
-                    ? `<button class="delete-comment-btn" data-comment-id="${comment.id}" style="background:#f87171; padding:4px 12px; font-size:0.8rem; width:auto; margin-left:12px;">删除</button>`
+                    ? `<button class="delete-comment-btn btn-inline btn-red comment-del" data-comment-id="${comment.id}">删除</button>`
                     : '';
                 const formattedComment = escapeHtml(comment.content).replace(/\n/g, '<br>');
                 return `

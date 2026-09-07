@@ -2,7 +2,7 @@
 let isSubmitting = false; // 防止重复提交
 
 document.addEventListener('DOMContentLoaded', async () => {
-    const token = localStorage.getItem('token');
+    const token = localStorage.getItem('accessToken') || localStorage.getItem('token');
     if (!token) {
         alert('请先登录后再操作文章！');
         window.location.href = 'index.html';
@@ -57,11 +57,11 @@ async function handleSubmit(e) {
     try {
         if (window.editArticleId) {
             // 编辑模式：调用 PUT 全量更新
-            await api.updateArticle(window.editArticleId, title, content);
+            await api.updateArticle(window.editArticleId, { title, content });
             publishMessage.innerText = '文章更新成功！正在返回列表...';
         } else {
             // 新建模式：调用 POST 创建
-            await api.createArticle(title, content);
+            await api.createArticle({ title, content });
             publishMessage.innerText = '文章发布成功！正在返回列表...';
         }
         publishMessage.style.color = 'green';

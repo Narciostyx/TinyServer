@@ -12,10 +12,14 @@ document.getElementById('loginForm').addEventListener('submit', async (e) => {
     loginMessage.style.display = 'none';
 
     try {
-        const data = await api.login(username, password);
+        const data = await api.login({ username, password });
         
-        if (data.token) {
-            localStorage.setItem('token', data.token);
+        if (data && data.accessToken) {
+            localStorage.setItem('token', data.accessToken);
+            localStorage.setItem('accessToken', data.accessToken);
+            localStorage.setItem('refreshToken', data.refreshToken || '');
+            localStorage.setItem('role', data.role || '');
+            localStorage.setItem('tokenExpiresIn', String(data.expiresIn || ''));
             localStorage.setItem('username', username);
             loginMessage.style.color = 'green';
             loginMessage.innerText = '登录成功，正在跳转...';

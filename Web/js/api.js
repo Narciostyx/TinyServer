@@ -10,9 +10,10 @@ const API_BASE_URL = 'http://127.0.0.1:8080/api';
  * 
  * @param {string} endpoint - API 相对路径
  * @param {Object} options - fetch 选项配置
+ * @param {string} authType - 认证类型: 'none' | 'access' | 'refresh' | 'optional'
  * @returns {Promise<any>} 返回解析后的 JSON 数据
  */
-async function apiFetch(endpoint, options = {}) {
+async function apiFetch(endpoint, options = {}, authType = 'none') {
     // 1. 全局约定: 数据交互统一使用 JSON 格式，有 body 则添加 Content-Type
     if (options.body && typeof options.body === 'string') {
         options.headers = {
@@ -21,13 +22,20 @@ async function apiFetch(endpoint, options = {}) {
         };
     }
 
-    // 2. 身份认证 (Auth): 携带 JWT Token
-    const token = localStorage.getItem('token');
-    if (token) {
-        options.headers = {
-            ...options.headers,
-            'Authorization': `Bearer ${token}`
-        };
+    // 2. 身份认证 (Auth): 仅在约定要求鉴权的接口上携带 JWT Token
+    if (authType !== 'none') {
+        const token = authType === 'refresh'
+            ? localStorage.getItem('refreshToken')
+            : (localStorage.getItem('accessToken') || localStorage.getItem('token'));
+        if (!token && authType !== 'optional') {
+            throw new Error('缺少授权令牌，请先登录');
+        }
+        if (token) {
+            options.headers = {
+                ...options.headers,
+                'Authorization': `Bearer ${token}`
+            };
+        }
     }
 
     try {
@@ -59,46 +67,52 @@ async function apiFetch(endpoint, options = {}) {
  */
 const api = {
     // 1. 认证相关
-    login: (username, password) =>
+    register: ({ username, password }) =>
+        apiFetch('/register', { method: 'POST', body: JSON.stringify({ username, password }) }),
+
+    login: ({ username, password }) =>
         apiFetch('/login', { method: 'POST', body: JSON.stringify({ username, password }) }),
 
+    refreshAccessToken: () =>
+        apiFetch('/refresh', { method: 'POST' }, 'refresh'),
+
     getUserStats: () =>
-        apiFetch('/user/stats', { method: 'GET' }),
+        apiFetch('/user/stats', { method: 'GET' }, 'access'),
 
     // 2. 文章相关
     getArticles: () =>
         apiFetch('/articles', { method: 'GET' }),
 
     getArticleById: (id) =>
-        apiFetch(`/articles/${id}`, { method: 'GET' }),
+        apiFetch(`/articles/${id}`, { method: 'GET' }, 'optional'),
 
     // 点赞/取消点赞文章（toggle）
     likeArticle: (id) =>
-        apiFetch(`/articles/${id}/like`, { method: 'POST' }),
+        apiFetch(`/articles/${id}/like`, { method: 'POST' }, 'access'),
 
     // 增加文章浏览量
     incrementView: (id) =>
         apiFetch(`/articles/${id}/view`, { method: 'POST' }),
 
-    createArticle: (title, content) =>
-        apiFetch('/articles', { method: 'POST', body: JSON.stringify({ title, content }) }),
+    createArticle: ({ title, content }) =>
+        apiFetch('/articles', { method: 'POST', body: JSON.stringify({ title, content }) }, 'access'),
 
-    updateArticle: (id, title, content) =>
-        apiFetch(`/articles/${id}`, { method: 'PUT', body: JSON.stringify({ title, content }) }),
+    updateArticle: (id, { title, content }) =>
+        apiFetch(`/articles/${id}`, { method: 'PUT', body: JSON.stringify({ title, content }) }, 'access'),
 
     patchArticle: (id, data) =>
-        apiFetch(`/articles/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+        apiFetch(`/articles/${id}`, { method: 'PATCH', body: JSON.stringify(data) }, 'access'),
 
     deleteArticle: (id) =>
-        apiFetch(`/articles/${id}`, { method: 'DELETE' }),
+        apiFetch(`/articles/${id}`, { method: 'DELETE' }, 'access'),
 
     // 3. 评论相关
     getComments: (articleId) =>
         apiFetch(`/comments?articleId=${articleId}`, { method: 'GET' }),
 
-    postComment: (articleId, content) =>
-        apiFetch('/comments', { method: 'POST', body: JSON.stringify({ articleId, content }) }),
+    postComment: ({ articleId, content }) =>
+        apiFetch('/comments', { method: 'POST', body: JSON.stringify({ articleId, content }) }, 'access'),
 
     deleteComment: (commentId) =>
-        apiFetch(`/comments/${commentId}`, { method: 'DELETE' })
+        apiFetch(`/comments/${commentId}`, { method: 'DELETE' }, 'access')
 };
