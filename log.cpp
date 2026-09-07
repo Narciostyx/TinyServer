@@ -1,6 +1,7 @@
 #include "log.hpp"
 #include <ctime>
 #include <cstdio>
+#include <mutex>
 
 //获取时间
 std::string project::Log::gettime()
@@ -24,9 +25,9 @@ std::string project::Log::gettime()
 
 void project::Log::init(bool flag, int buffer_size, int queue_size, long row_max, std::string path, long row_flush)
 {
-	LockGuard<> lock(mutex_);
+	std::lock_guard<std::mutex> lock(mutex_);
 	if (!std::filesystem::exists(path))
-		if (!std::filesystem::create_directory(path))
+		if (!std::filesystem::create_directories(path))
 		{
 			perror("Create Log directory in this directory failed.");
 			exit(exit_code = -1);
@@ -51,7 +52,8 @@ void project::Log::init(bool flag, int buffer_size, int queue_size, long row_max
 	if (is_async_)
 	{
 		run_ = true;
-		write_t_.start(worker_func_);
+		// 用 std::thread 启动后台写线程（worker_func_ 为捕获 this 的成员函数对象）
+		write_t_ = std::thread([this] { worker_func_(); });
 	}
 }
 
@@ -61,7 +63,7 @@ void project::Log::write_log(int level, const std::string& data)
 		return;
 	if (row_cnt_++ >= row_max_)
 	{
-		LockGuard<> lock(mutex_);
+		std::lock_guard<std::mutex> lock(mutex_);
 		reach_full_ = true;
 		while (!queue_->empty())
 		{
@@ -106,7 +108,7 @@ void project::Log::write_log(int level, const std::string& data)
 
 void project::Log::write_async(std::string& data)
 {
-	LockGuard<> lock(mutex_);
+	std::lock_guard<std::mutex> lock(mutex_);
 	while (true)
 		if (queue_->push(std::move(data)))
 			break;
@@ -119,7 +121,7 @@ void project::Log::write_async(std::string& data)
 
 void project::Log::write_sync(std::string& data)
 {
-	LockGuard<> lock(mutex_);
+	std::lock_guard<std::mutex> lock(mutex_);
 	file_ << data;
 	file_.flush();
 }
