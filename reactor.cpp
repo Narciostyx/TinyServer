@@ -3,11 +3,11 @@
 
 #include <errno.h>
 #include <stdint.h>
+#include <algorithm>
 #include <sys/eventfd.h>
 
 // 子Reactor构造：保存线程池指针
-project::SubReactor::SubReactor(ThreadPool* pool, int max_listen,int timeout) : threadpool_(pool), listen_max_(max_listen),time_out_(timeout) {
-    last_check_time_ = std::chrono::steady_clock::now();
+project::SubReactor::SubReactor(ThreadPool* pool, int max_listen,int timeout) : threadpool_(pool), listen_max_(max_listen),idle_timeout_sec_(timeout) {
     epoll_fd_ = epoll_create1(0);
     if (epoll_fd_ < 0)
         throw Err("Failed to create the file descriptor of epoll.", kErrType::Reactor_init);
@@ -51,6 +51,36 @@ void project::SubReactor::stop()
     }
 }
 
+// 跨线程投递任务到 reactor 线程（线程安全，eventfd 唤醒）
+void project::SubReactor::post(std::function<void()> task)
+{
+    {
+        std::lock_guard<std::mutex> lock(task_mu_);
+        tasks_.push_back(std::move(task));
+    }
+    if (wakeup_fd_ >= 0)
+    {
+        uint64_t one = 1;
+        (void)::write(wakeup_fd_, &one, sizeof(one));
+    }
+}
+
+// 消费任务队列（loop 内调用，reactor 线程）
+void project::SubReactor::process_tasks()
+{
+    std::deque<std::function<void()>> local;
+    {
+        std::lock_guard<std::mutex> lock(task_mu_);
+        local.swap(tasks_);
+    }
+    for (auto& t : local)
+    {
+        try { t(); }
+        catch (const std::exception& e) { LOG_ERR(std::string("Exception in reactor task: ") + e.what()); }
+        catch (...) { LOG_ERR("Unknown exception in reactor task."); }
+    }
+}
+
 bool project::SubReactor::add_fd(int fd) {
     if (current_listen_ >= listen_max_) {
         LOG_WARN("SubReactor reached max listen capacity.");
@@ -58,8 +88,8 @@ bool project::SubReactor::add_fd(int fd) {
     }
 
     epoll_event ev{};
-    // 默认监听读事件和边缘触发(如果需要)，以及对端断开连接(EPOLLRDHUP | EPOLLHUP)
-    ev.events = EPOLLIN | EPOLLRDHUP | EPOLLHUP; 
+    // 边缘触发(EPOLLET)：读回调必须循环 recv 到 EAGAIN；配合非阻塞 fd 使用
+    ev.events = EPOLLIN | EPOLLRDHUP | EPOLLHUP | EPOLLET;
     ev.data.fd = fd;
     if (epoll_ctl(epoll_fd_, EPOLL_CTL_ADD, fd, &ev) < 0)
     {
@@ -68,17 +98,26 @@ bool project::SubReactor::add_fd(int fd) {
     }
 
     // 初始化上下文
-    fd_contexts_[fd] = FdContext{};
+    FdContext ctx{};
+    auto now = std::chrono::steady_clock::now();
+    ctx.last_active = now;
+    ctx.last_heap_push = now;
+    fd_contexts_[fd] = std::move(ctx);
+    // 新连接注册即推进一条空闲到期记录（便于空闲连接按时清理）
+    idle_heap_.push(IdleEntry{ now + std::chrono::seconds(idle_timeout_sec_), fd });
     current_listen_++;
     return true;
 }
 
 void project::SubReactor::set_callbacks(int fd, EventCallback read_cb, EventCallback write_cb, std::shared_ptr<Connection> conn) {
-    if (fd_contexts_.count(fd)) {
-        fd_contexts_[fd].read_cb = std::move(read_cb);
-        fd_contexts_[fd].write_cb = std::move(write_cb);
-        fd_contexts_[fd].conn_ptr = std::move(conn);
-    }
+    auto it = fd_contexts_.find(fd);
+    if (it == fd_contexts_.end()) return;
+    it->second.read_cb = std::move(read_cb);
+    it->second.write_cb = std::move(write_cb);
+    it->second.conn_ptr = std::move(conn);
+    auto now = std::chrono::steady_clock::now();
+    it->second.last_active = now;
+    it->second.last_heap_push = now;
 }
 
 bool project::SubReactor::modify_epoll_events(int fd, uint32_t events) {
@@ -93,6 +132,10 @@ bool project::SubReactor::modify_epoll_events(int fd, uint32_t events) {
 }
 
 bool project::SubReactor::remove_fd(int fd) {
+    // 幂等保护：已移除的 fd 直接返回，避免重复 DEL 误删"被内核重用的 fd"
+    if (fd_contexts_.find(fd) == fd_contexts_.end())
+        return true;
+
     if (epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, fd, nullptr) < 0)
     {
         LOG_ERR("Failed to remove the fd " + std::to_string(fd) + " from epoll instance and push into the abnormal queue.");
@@ -106,29 +149,70 @@ bool project::SubReactor::remove_fd(int fd) {
     return true;
 }
 
-void project::SubReactor::check_idle_connections() {
-    auto now = std::chrono::steady_clock::now();
-    if (std::chrono::duration_cast<std::chrono::seconds>(now - last_check_time_).count() < time_out_) {
+// 事件触发时更新该 fd 的活跃时间并推进最小堆
+void project::SubReactor::on_active(int fd) {
+    auto it = fd_contexts_.find(fd);
+    if (it == fd_contexts_.end())
         return;
+    auto now = std::chrono::steady_clock::now();
+    it->second.last_active = now;
+    // close_expired本身依据last_active，而非最小堆里的值
+    if (now - it->second.last_heap_push >= std::chrono::seconds(1)) {
+        it->second.last_heap_push = now;
+        idle_heap_.push(IdleEntry{ now + std::chrono::seconds(idle_timeout_sec_), fd });
     }
-    last_check_time_ = now;
+}
 
-    std::vector<int> to_close;
-    for (auto& pair : fd_contexts_) {
-        if (pair.second.conn_ptr) {
-            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
-                now - pair.second.conn_ptr->last_active_time()).count();
-            if (elapsed > idle_timeout_s_) {
-                LOG_WARN("fd " + std::to_string(pair.first) + " timeout, will close.");
-                to_close.push_back(pair.first);
-            }
-        }
+// 距下一个空闲连接到期的毫秒数；无到期项返回 -1
+long long project::SubReactor::next_timeout_ms() {
+    while (!idle_heap_.empty()) {
+        auto now = std::chrono::steady_clock::now();
+        const auto& top = idle_heap_.top();
+        if (top.expire_at <= now) return 0; // 已有到期项，epoll_wait 立即返回以处理
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(top.expire_at - now).count();
+        return ms;
     }
-    for (int fd : to_close) {
-        // Send a disconnect message before closing
+    return -1;
+}
+
+// 关闭已到期的空闲连接（lazy deletion：堆顶条目对应的 fd 若期间又活跃过则跳过）
+void project::SubReactor::close_expired() {
+    auto now = std::chrono::steady_clock::now();
+    while (!idle_heap_.empty() && idle_heap_.top().expire_at <= now) {
+        IdleEntry e = idle_heap_.top();
+        idle_heap_.pop();
+        auto it = fd_contexts_.find(e.fd);
+        if (it == fd_contexts_.end()) continue; // 连接已被移除，lazy 跳过
+        if (now - it->second.last_active < std::chrono::seconds(idle_timeout_sec_)) continue; // 期间又活跃过
+        LOG_WARN("fd " + std::to_string(e.fd) + " idle timeout, will close.");
         const char disconnect_msg[] = "Server forced disconnect due to inactivity\r\n";
-        ::send(fd, disconnect_msg, sizeof(disconnect_msg) - 1, MSG_NOSIGNAL);
+        (void)::send(e.fd, disconnect_msg, sizeof(disconnect_msg) - 1, MSG_NOSIGNAL);
+        remove_fd(e.fd);
+    }
+}
+
+// 刷新连接写缓冲：发送响应；遇 EAGAIN 注册 EPOLLOUT 等待可写事件（reactor 线程内调用）
+void project::SubReactor::flush_write(std::shared_ptr<Connection> conn) {
+    if (!conn) return;
+    int fd = conn->get_fd();
+    if (fd_contexts_.find(fd) == fd_contexts_.end())
+        return; // 连接已被移除，不再发送
+
+    std::vector<char> data = conn->take_write_buffer();
+    size_t off = 0;
+    while (off < data.size()) {
+        int n = ::send(fd, data.data() + off, data.size() - off, MSG_NOSIGNAL);
+        if (n > 0) { off += (size_t)n; continue; }
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            // 发送缓冲满：未发送部分放回缓冲，注册 EPOLLOUT 由写事件继续发送
+            conn->prepend_write_buffer(data.data() + off, data.size() - off);
+            modify_epoll_events(fd, EPOLLIN | EPOLLOUT | EPOLLRDHUP | EPOLLHUP | EPOLLET);
+            return;
+        }
+        LOG_WARN("fd " + std::to_string(fd) + " send error, close. errno: " + std::to_string(errno));
         remove_fd(fd);
+        return;
     }
 }
 
@@ -136,7 +220,14 @@ void project::SubReactor::loop() {
     const int MAX_EVENTS = kMaxListenNum;
     epoll_event events[MAX_EVENTS];
     while (running_.load(std::memory_order_relaxed)) {
-        int n = epoll_wait(epoll_fd_, events, MAX_EVENTS, 3000); // 3 seconds timeout
+        // 先消费由 post() 投递的任务（新连接注册、发送响应、关闭连接等）
+        process_tasks();
+
+        // epoll_wait 超时与"下一个空闲连接到期时刻"联动（无到期项时兜底 1 秒）
+        long long tmo = next_timeout_ms();
+        int wait_ms = (tmo < 0) ? 1000 : (int)std::min<long long>(tmo, 1000);
+
+        int n = epoll_wait(epoll_fd_, events, MAX_EVENTS, wait_ms);
         if (n < 0)
         {
             if (errno == EINTR) continue;
@@ -144,7 +235,8 @@ void project::SubReactor::loop() {
             continue;
         }
 
-        check_idle_connections();
+        // 处理已到期的空闲连接
+        close_expired();
 
         for (int i = 0; i < n; ++i) {
             int fd = events[i].data.fd;
@@ -165,9 +257,9 @@ void project::SubReactor::loop() {
             auto& ctx = fd_contexts_[fd];
             bool should_close = false;
 
-            if (ctx.conn_ptr) {
-                ctx.conn_ptr->update_last_active_time();
-            }
+            // 更新活跃时间（推进空闲超时最小堆）
+            ctx.last_active = std::chrono::steady_clock::now();
+            on_active(fd);
 
             // 对端关闭连接或发生错误
             if (trigger_events & (EPOLLRDHUP | EPOLLHUP | EPOLLERR)) {
