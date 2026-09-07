@@ -7,7 +7,10 @@
 
 namespace project
 {
+	// 考虑使用标准库<mutex>而非本文件
+
 	//对POSIX互斥锁的封装
+	[[deprecated("Use std::mutex instead of project::Mutex.")]]
 	class Mutex
 	{
 	public:
@@ -30,7 +33,7 @@ namespace project
 
 	//针对Mutex类的RAII封装
 	template<typename MutexType=Mutex>
-	class LockGuard
+	class [[deprecated("Use std::lock_guard / std::unique_lock instead of project::LockGuard.")]] LockGuard
 	{
 	public:
 		LockGuard(MutexType& mutex) :mutex_(mutex) { if (!mutex_.lock()) throw std::runtime_error("Failed to lock the mutex."); }
@@ -46,6 +49,7 @@ namespace project
 	};
 
 	//对POSIX线程信号量的封装
+	[[deprecated("Use std::counting_semaphore (C++20, <semaphore>) instead of project::Sem.")]]
 	class Sem
 	{
 	public:
@@ -66,6 +70,7 @@ namespace project
 	};
 
 	//对POSIX线程条件变量的封装
+	[[deprecated("Use std::condition_variable instead of project::CondVar.")]]
 	class CondVar
 	{
 	public:
