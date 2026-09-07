@@ -37,7 +37,7 @@
 | `log.hpp/.cpp` | 同步/异步日志（`ILogger` + 默认适配器），`LOG_*` 宏 |
 | `metrics.hpp` | 指标注册表 + Prometheus/健康检查渲染 |
 | `threadsafe_queue.hpp` | 线程安全队列（std 实现，供日志异步队列） |
-| `config.hpp/.cpp` | 命令行 + `./Cfg/config` 配置（自动生成/回退） |
+| `config.hpp/.cpp` | 命令行 + `./TinyServerVar/config` 配置（自动生成/回退） |
 | `error.hpp` | 异常 `Err` + `kErrType` + 退出码 |
 | `thread.hpp` / `mutex.hpp` | **已弃用（`[[deprecated]]`）**：早期 pthread 封装，保留兼容；勿用于新代码 |
 
@@ -78,7 +78,7 @@ TINYSERVER_CORS_ORIGIN=https://example.com  # CORS 白名单，默认 *
 
 - Redis **连不上不致命**：服务照常启动，日志给 WARN；业务层 `enabled()` 为 false 后自动降级（缓存穿透 DB、限流/去重回退进程内）。
 - 数据库需按 `TinyServer/DB 结构`（user/article/comment/user_likes 四表，见下方 DDL 注）预建 `webdatabase`，默认账号 `webdb/webdb`（可在配置文件修改）。
-- JWT 密钥须 ≥32 字符：内置演示默认值，**上线必须修改**（改 `Cfg/config` 的 `Jwt_secret`）。
+- JWT 密钥须 ≥32 字符：内置演示默认值，**上线必须修改**（改 `TinyServerVar/config` 的 `Jwt_secret`）。
 
 ## 核心机制速览
 
