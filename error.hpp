@@ -4,6 +4,7 @@
 #include <string>
 #include <exception>
 
+// 全局错误类
 class Err :public std::exception
 {
 public:
@@ -22,7 +23,7 @@ private:
 
 namespace project
 {
-	enum kErrType :int { defaultType = -1, Sql_init, Sql_conn, Reactor_init, Thread_wrong };
+	enum kErrType :int { defaultType = -1, Sql_init, Sql_conn, Reactor_init, Thread_wrong, Redis_error };
 	inline int exit_code = 0;
 }
 
