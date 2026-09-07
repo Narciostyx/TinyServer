@@ -3,19 +3,14 @@
 
 #include <queue>
 #include <optional>
-
-#include "mutex.hpp"
-#include "alloc.hpp"
-
-/* STL分配器有以下要求：
-* 定义类型：value_type，size_type，different_type
-* 定义方法：allocate，deallocate，重载运算符==与!=
-* 定义不同实例模板分配器类的转化构造函数
-*/
+#include <deque>
+#include <mutex>
+#include <condition_variable>
+#include <chrono>
 
 namespace project
 {
-	//基于STL Queue的线程安全队列，禁止拷贝与移动
+	// 基于STL Queue的线程安全队列（std::mutex + std::condition_variable），禁止拷贝与移动
 	template<typename T, typename Allocator = std::allocator<T>>
 	class ThreadSafeQueue
 	{
@@ -26,54 +21,41 @@ namespace project
 
 		~ThreadSafeQueue() = default;
 		ThreadSafeQueue(const ThreadSafeQueue&) = delete;
-		ThreadSafeQueue& operator==(const ThreadSafeQueue&) = delete;
+		ThreadSafeQueue& operator=(const ThreadSafeQueue&) = delete;
 		ThreadSafeQueue(ThreadSafeQueue&&) = delete;
-		ThreadSafeQueue& operator==(ThreadSafeQueue&&) = delete;
+		ThreadSafeQueue& operator=(ThreadSafeQueue&&) = delete;
 
-		bool empty() { LockGuard<> lock(mutex_); bool ret = size_ == 0 ? true : false; return ret; }
-		bool full() { LockGuard<> lock(mutex_); bool ret = size_ == max_size_; return ret; }
-		size_t size() { LockGuard<> lock(mutex_); size_t ret = size_; return ret; }
+		bool empty() { std::lock_guard<std::mutex> lock(mutex_); return size_ == 0; }
+		bool full() { std::lock_guard<std::mutex> lock(mutex_); return size_ == max_size_; }
+		size_t size() { std::lock_guard<std::mutex> lock(mutex_); return size_; }
 
-		//压入队列
+		//压入队列（满则返回 false，语义不变；调用方决定重试或丢弃）
 		bool push(T&& data)
 		{
-			LockGuard<> lock(mutex_);
+			std::lock_guard<std::mutex> lock(mutex_);
 			if (size_ == max_size_)
-			{
-				cond_.signal();
 				return false;
-			}
 			queue_.push(std::move(data));
 			size_++;
-			cond_.signal();
+			cond_.notify_one();
 			return true;
 		}
-		//弹出队列
+		//弹出队列（队列为空则阻塞等待，直到有数据）
 		std::optional<T> pop()
 		{
-			LockGuard<> lock(mutex_);
-			while (size_ == 0)
-				if (!cond_.wait(mutex_.get()))
-					return std::nullopt;
+			std::unique_lock<std::mutex> lock(mutex_);
+			cond_.wait(lock, [this] { return size_ > 0; });
 			T ret = std::move(queue_.front());
 			queue_.pop();
 			size_--;
 			return ret;
 		}
-		//带超时机制的弹出队列
+		//带超时机制的弹出队列（超时返回 std::nullopt）
 		std::optional<T> popWithTime(int sec)
 		{
-			LockGuard<> lock(mutex_);
-			if (size_ == 0)
-			{
-				timespec time;
-				if (clock_gettime(CLOCK_REALTIME, &time) == -1)
-					return std::nullopt;
-				time.tv_sec += sec;
-				while (size_ == 0)
-					if (!cond_.timedwait(mutex_.get(), &time))
-						return std::nullopt;
-			}
+			std::unique_lock<std::mutex> lock(mutex_);
+			if (!cond_.wait_for(lock, std::chrono::seconds(sec), [this] { return size_ > 0; }))
+				return std::nullopt;
 			T ret = std::move(queue_.front());
 			queue_.pop();
 			size_--;
@@ -84,8 +66,8 @@ namespace project
 		int max_size_;
 		int size_ = 0;
 		Allocator alloc_;
-		Mutex mutex_;
-		CondVar cond_;
+		std::mutex mutex_;
+		std::condition_variable cond_;
 		std::queue<T, std::deque<T, Allocator>> queue_;
 	};
 }
