@@ -3,23 +3,16 @@
 
 namespace project
 {
-	//自定义线性内存分配器
-	//废弃
+	// 自定义线性内存分配器（非线程安全）
 	template<typename T>
-	class CustomizedAllocator
+	class [[deprecated( "Use std::allocator instead of project::CustomizedAllocator." )]] CustomizedAllocator
 	{
 	public:
-		//分配器模板值类型
 		using value_type = T;
-		//分配器模板大小类型
 		using size_type = std::size_t;
-		//分配器模板比较类型
 		using difference_type = std::ptrdiff_t;
 
-		//构造函数
-		//参数：最大分配大小
 		CustomizedAllocator(size_type max_size) :max_size_(max_size), allocated_(new size_type(0)), count_(new size_type(1)) { mem_ = ::operator new[](max_size_ * sizeof(T)); }
-		//拷贝构造函数
 		CustomizedAllocator(const CustomizedAllocator& other)
 		{
 			mem_ = other.mem_;
@@ -28,7 +21,6 @@ namespace project
 			count_ = other.count_;
 			++(*count_);
 		}
-		//拷贝赋值运算符
 		CustomizedAllocator& operator=(const CustomizedAllocator& other)
 		{
 			if (this != &other)
@@ -41,7 +33,6 @@ namespace project
 			}
 			return *this;
 		}
-		//移动构造函数
 		CustomizedAllocator(CustomizedAllocator&& other) noexcept :mem_(other.mem_), max_size_(other.max_size_), allocated_(other.allocated_), count_(other.count_)
 		{
 			other.mem_ = nullptr;
@@ -49,7 +40,6 @@ namespace project
 			other.allocated_ = nullptr;
 			other.count_ = nullptr;
 		}
-		//移动赋值运算符
 		CustomizedAllocator& operator=(CustomizedAllocator&& other)
 		{
 			if (this != &other)
@@ -65,14 +55,11 @@ namespace project
 			}
 			return *this;
 		}
-		//模板构造函数，允许从其他类型实例模板转化
 		template<typename U>CustomizedAllocator(const CustomizedAllocator<U>& other) :mem_(other.mem_), max_size_(other.max_size_), allocated_(other.allocated_), count_(other.count_) { ++(*count_); }
-		//析构函数
 		~CustomizedAllocator()
 		{
 			release();
 		}
-		//分配（线性）空间
 		T* allocate(size_type n) noexcept
 		{
 			if (n == 0 || n < 0)
@@ -83,7 +70,6 @@ namespace project
 			*allocated_ += n;
 			return ret;
 		}
-		//收回（线性）空间
 		void deallocate(T* ptr, size_type n) noexcept
 		{
 			if (n > max_size_ || n > *allocated_)
