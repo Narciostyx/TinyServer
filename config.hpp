@@ -13,10 +13,15 @@
 namespace project
 {
 
-	//版本号
+	// 版本号
 	static const char version[] = "1.0";
 
-	//长选项结构体
+	/**
+	 * port：监听端口
+	 * logType：日志同步（/异步）记录
+	 * sqlNum：数据库连接池最大值
+	 * threadNum：线程池最大值
+	 */
 	static const struct option long_option[] = {
 		{"port",required_argument,NULL,'p'},
 		{"logType",required_argument,NULL,'l'},
@@ -27,29 +32,39 @@ namespace project
 		{NULL,NULL,NULL,NULL}
 	};
 
-	//短选项
 	static const char short_option[] = "p:l:s:t:hv";
 
-	//默认池内线程最大数
+	// 默认池内线程最大数
 	constexpr int kMaxThreadNum = 3000;
-	//默认池内数据库连接最大数
+	// 默认池内数据库连接最大数
 	constexpr int kMaxSqlNum = 3000;
 
-	//命名行解析类
+	// 命名行解析类
 	class Config
 	{
 	public:
+		// 启动相关
 		int port, sql_num, thread_num;
+
+		// 日志相关
 		int log_type, log_buffer_size, log_queue_size;
 		std::string log_path;
 		long log_row_flush, log_row_max;
+
+		// 数据库相关
 		int dbport;
 		std::string address, username, passwd, dbname;
 		bool retry;
+
+		// reactor模型相关
 		int sub_reactor_num, time_out, max_listening;
+
+		// jwt认证相关
 		std::string jwt_secret;
 		long jwt_access_exp_seconds;
 		long jwt_refresh_exp_seconds;
+		// CORS 允许来源白名单；默认 "*"（开发便利）。生产建议通过环境变量 TINYSERVER_CORS_ORIGIN 收紧。
+		std::string cors_origin = "*";
 
 		Config()
 		{
@@ -59,7 +74,7 @@ namespace project
 			log_type = 0;
 			log_buffer_size = 1024;
 			log_queue_size = 1024;
-			log_path = "./log/";
+			log_path = "./TinyServerVar/log/";
 			log_row_max = 50000;
 			log_row_flush = 200;
 			address = "127.0.0.1";
@@ -75,11 +90,16 @@ namespace project
 			jwt_access_exp_seconds = 60 * 60 * 24 * 7;
 			jwt_refresh_exp_seconds = 60 * 60 * 24 * 30;
 		}
-		//解析命令行参数
+		/**
+		 * 解析命令行参数.
+		 * 
+		 * \param argc：参数个数
+		 * \param argv：参数数组
+		 */
 		void parseArg(int, char* []);
 
 	private:
-		//打印帮助
+		// 打印帮助
 		void printHelp()
 		{
 			std::cout << "Usage:.\\TinyServer Options\n"
@@ -97,9 +117,9 @@ namespace project
 				<< "\tjwt_secret is the key used in the jwt encryption."
 				<< std::endl;
 		}
-		//打印版本
+		// 打印版本
 		void printVersion() { std::cout << "Current version:" << std::string(version) << std::endl; }
-		//打印配置信息
+		// 打印配置信息
 		void printInfo()
 		{
 			std::cout << "Port:" << port << "\nlogType:" << ((log_type == 0) ? std::string("sync\n") : std::string("async\n"))
@@ -108,17 +128,50 @@ namespace project
 				<< " threads will be running."
 				<< std::endl;
 		}
+		// 创建默认配置文件
+		void createDefaultConfig(std::fstream& file,std::filesystem::path path)
+		{
+			file.open(path,std::ios::out);
+			if(!file.is_open())
+			{
+				perror("Open failed");
+				exit(exit_code = -1);
+			}
+			file << "[Config]"
+				<< "\nPort " << port
+				<< "\nSQL_num " << sql_num
+				<< "\nThread_num " << thread_num
+				<< "\nLog_type " << log_type
+				<< "\nLog_buffer_size " << log_buffer_size
+				<< "\nLog_queue_size " << log_queue_size
+				<< "\nLog_path " << log_path
+				<< "\nLog_row_max " << log_row_max
+				<< "\nLog_row_flush " << log_row_flush
+				<< "\nDB_address " << address
+				<< "\nDB_port " << dbport
+				<< "\nDB_username " << username
+				<< "\nDB_passwd " << passwd
+				<< "\nDB_dbname " << dbname
+				<< "\nDB_retry " << ( retry ? 1 : 0 )
+				<< "\nSub_reactor_count " << sub_reactor_num
+				<< "\nTime_out_connection " << time_out
+				<< "\nJwt_secret " << jwt_secret
+				<< "\nJwt_access_exp_seconds " << jwt_access_exp_seconds
+				<< "\nJwt_refresh_exp_seconds " << jwt_refresh_exp_seconds;
+			file.close();
+		}
+		// 从文件载入配置
 		void loadConfigFromFile()
 		{
-			std::filesystem::path path = "./Cfg";
+			std::filesystem::path path = "./TinyServerVar";
 			std::filesystem::path cfgPath = path / "config";
 			std::filesystem::path bakPath = path / "config.bak";
 			std::fstream file;
 
 			// 判断路径是否存在，不存在则尝试创建
 			if (!std::filesystem::exists(path)) {
-				if (!std::filesystem::create_directory(path)) {
-					perror("Can't create the path:./Cfg");
+				if (!std::filesystem::create_directories(path)) {
+					perror("Can't create the path:./ServerConfig");
 					exit(exit_code = -1);
 				}
 			}
@@ -128,67 +181,13 @@ namespace project
 				if (std::filesystem::exists(bakPath)) {
 					if (!std::filesystem::copy_file(bakPath, cfgPath, std::filesystem::copy_options::overwrite_existing)) {
 						std::cout << "Load config from backup failed.\nCreate default config file.\n";
-						// 创建默认配置文件
-						file.open(cfgPath, std::ios::out);
-						if (!file.is_open()) {
-							perror("Open failed");
-							exit(exit_code = -1);
-						}
-						file << "[Config]"
-							<< "\nPort " << port
-							<< "\nSQL_num " << sql_num
-							<< "\nThread_num " << thread_num
-							<< "\nLog_type " << log_type
-							<< "\nLog_buffer_size " << log_buffer_size
-							<< "\nLog_queue_size " << log_queue_size
-							<< "\nLog_path " << log_path
-							<< "\nLog_row_max " << log_row_max
-							<< "\nLog_row_flush " << log_row_flush
-							<< "\nDB_address " << address
-							<< "\nDB_port " << dbport
-							<< "\nDB_username " << username
-							<< "\nDB_passwd " << passwd
-							<< "\nDB_dbname " << dbname
-							<< "\nDB_retry " << (retry ? 1 : 0)
-							<< "\nSub_reactor_count " << sub_reactor_num
-							<< "\nTime_out_connection " << time_out
-							<< "\nJwt_secret " << jwt_secret
-							<< "\nJwt_access_exp_seconds " << jwt_access_exp_seconds
-							<< "\nJwt_refresh_exp_seconds " << jwt_refresh_exp_seconds;
-						file.close();
+						createDefaultConfig(file, cfgPath);
 						return;
 					}
 				}
 				else {
 					// 没有备份，直接创建默认配置文件
-					file.open(cfgPath, std::ios::out);
-					if (!file.is_open()) {
-						perror("Open failed");
-						exit(exit_code = -1);
-					}
-					file << "[Config]"
-						<< "\nPort " << port
-						<< "\nSQL_num " << sql_num
-						<< "\nThread_num " << thread_num
-						<< "\nLog_type " << log_type
-						<< "\nLog_buffer_size " << log_buffer_size
-						<< "\nLog_queue_size " << log_queue_size
-						<< "\nLog_path " << log_path
-						<< "\nLog_row_max " << log_row_max
-						<< "\nLog_row_flush " << log_row_flush
-						<< "\nDB_address " << address
-						<< "\nDB_port " << dbport
-						<< "\nDB_username " << username
-						<< "\nDB_passwd " << passwd
-						<< "\nDB_dbname " << dbname
-						<< "\nDB_retry " << (retry ? 1 : 0)
-						<< "\nSub_reactor_count " << sub_reactor_num
-						<< "\nTime_out_connection " << time_out
-						<< "\nMax_listening_connection " << max_listening
-						<< "\nJwt_secret " << jwt_secret
-						<< "\nJwt_access_exp_seconds " << jwt_access_exp_seconds
-						<< "\nJwt_refresh_exp_seconds " << jwt_refresh_exp_seconds;
-					file.close();
+					createDefaultConfig(file, cfgPath);
 					return;
 				}
 			}
@@ -200,10 +199,9 @@ namespace project
 				exit(exit_code = -1);
 			}
 
-			//键名
-			std::string key;
-			//值
-			std::string val;
+			std::string key, val;
+
+			// parse_xxx均为辅助函数，负责执行安全类型转换
 
 			auto parse_int = [](const std::string& s, int& out) -> bool {
 				try {
@@ -229,6 +227,13 @@ namespace project
 				if (s == "1" || s == "true" || s == "True" || s == "TRUE") { out = true; return true; }
 				if (s == "0" || s == "false" || s == "False" || s == "FALSE") { out = false; return true; }
 				return false;
+				};
+
+			// 终止函数
+			auto exitAndReport = [](const std::string& s)
+				{
+					std::cout << "Illegal value for " << s << " in the configuration file.\n";
+					exit(exit_code = -1);
 				};
 
 			while (file >> key)
@@ -262,84 +267,62 @@ namespace project
 				{
 					int v = 0;
 					if (!parse_int(val, v) || v <= 0 || v > 65535)
-					{
-						std::cout << "Illegal port in config file!\n";
-						exit(exit_code = -1);
-					}
+						exitAndReport("port");
 					port = v;
 				}
 				else if (key == "SQL_num")
 				{
 					int v = 0;
 					if (!parse_int(val, v) || v <= 0 || v > kMaxSqlNum)
-					{
-						std::cout << "Ilegal value for the SQL_num in config file.\n";
-						exit(exit_code = -1);
-					}
+						exitAndReport("SQL_num");
 					sql_num = v;
 				}
 				else if (key == "Thread_num")
 				{
 					int v = 0;
 					if (!parse_int(val, v) || v <= 0 || v > kMaxThreadNum)
-					{
-						std::cout << "Ilegal value for the Thread_num in config file.\n";
-						exit(exit_code = -1);
-					}
+						exitAndReport("Thread_num");
 					thread_num = v;
 				}
 				else if (key == "Log_type")
 				{
 					int v = 0;
 					if (!parse_int(val, v) || v < 0 || v > 1)
-					{
-						std::cout << "The argument of Log_type must be 0 or 1!\n";
-						exit(exit_code = -1);
-					}
+						exitAndReport("Log_type");
 					log_type = v;
 				}
 				else if (key == "Log_buffer_size")
 				{
 					int v = 0;
 					if (!parse_int(val, v) || v <= 0)
-					{
-						std::cout << "Ilegal value for the Log_buffer_size in config file.\n";
-						exit(exit_code = -1);
-					}
+						exitAndReport("Log_buffer_size");
 					log_buffer_size = v;
 				}
 				else if (key == "Log_queue_size")
 				{
 					int v = 0;
 					if (!parse_int(val, v) || v <= 0)
-					{
-						std::cout << "Illegal value for the Log_queue_size in config file.\n";
-						exit(exit_code = -1);
-					}
+						exitAndReport("Log_queue_size");
 					log_queue_size = v;
 				}
 				else if (key == "Log_path")
 				{
 					log_path = val;
+					if (!std::filesystem::is_directory(val))
+						exitAndReport("Log_path");
 				}
 				else if (key == "Log_row_max")
 				{
 					long v = 0;
 					if (!parse_long(val, v) || v <= 0)
-					{
-						std::cout << "IIlegal value for the Log_row_max in config file.\n";
-						exit(exit_code = -1);
-					}
+						exitAndReport("Log_row_max");
 					log_row_max = v;
 				}
 				else if (key == "Log_row_flush")
 				{
 					long v = 0;
 					if (!parse_long(val, v) || v <= 0)
-					{
-						std::cout << "IIlegal value for the Log_row_flush in config file.\n";
-						exit(exit_code = -1);
-					}
+						exitAndReport("Log_row_flush");
 					log_row_flush = v;
 				}
 				else if (key == "DB_address")
@@ -350,10 +333,7 @@ namespace project
 				{
 					int v = 0;
 					if (!parse_int(val, v) || v <= 0 || v > 65535)
-					{
-						std::cout << "Ilegal value for the DB_port in config file.\n";
-						exit(exit_code = -1);
-					}
+						exitAndReport("DB_port");
 					dbport = v;
 				}
 				else if (key == "DB_username")
@@ -372,40 +352,28 @@ namespace project
 				{
 					bool v = false;
 					if (!parse_bool(val, v))
-					{
-						std::cout << "Ilegal value for the DB_retry in config file.\n";
-						exit(exit_code = -1);
-					}
+						exitAndReport("DB_retry");
 					retry = v;
 				}
 				else if (key == "Sub_reactor_count")
 				{
 					int v = 0;
 					if (!parse_int(val, v) || v <= 0 || v > 10000)
-					{
-						std::cout << "Ilegal value for the Sub_reactor_count in config file.\n";
-						exit(exit_code = -1);
-					}
+						exitAndReport("Sub_reactor_count");
 					sub_reactor_num = v;
 				}
 				else if (key == "Time_out_connection")
 				{
 					int v = 0;
 					if (!parse_int(val, v) || v <= 0)
-					{
-						std::cout << "Ilegal value for the Time_out_connection in config file.\n";
-						exit(exit_code = -1);
-					}
+						exitAndReport("Time_out_connection");
 					time_out = v;
 				}
 				else if (key == "Max_listening_connection")
 				{
 					int v = 0;
 					if (!parse_int(val, v) || v <= 0)
-					{
-						std::cout << "Ilegal value for the Max_listening_connection in config file.\n";
-						exit(exit_code = -1);
-					}
+						exitAndReport("Max_listening_connection");
 					max_listening = v;
 				}
 				else if (key == "Jwt_secret")
@@ -416,25 +384,19 @@ namespace project
 				{
 					long v = 0;
 					if (!parse_long(val, v) || v <= 0)
-					{
-						std::cout << "Ilegal value for the Jwt_access_exp_seconds in config file.\n";
-						exit(exit_code = -1);
-					}
+						exitAndReport("Jwt_access_exp_seconds");
 					jwt_access_exp_seconds = v;
 				}
 				else if (key == "Jwt_refresh_exp_seconds")
 				{
 					long v = 0;
 					if (!parse_long(val, v) || v <= 0)
-					{
-						std::cout << "Ilegal value for the Jwt_refresh_exp_seconds in config file.\n";
-						exit(exit_code = -1);
-					}
+						exitAndReport("Jwt_refresh_exp_seconds");
 					jwt_refresh_exp_seconds = v;
 				}
 				else
 				{
-					// 未知字段：忽略
+					continue;
 				}
 			}
 			file.close();
