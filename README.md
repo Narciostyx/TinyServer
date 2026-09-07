@@ -1,101 +1,116 @@
 # TinyServer
 
-实现一个基于 C++11 和 POSIX 接口的轻量级并发网络服务器。
+基于 **C++20 + Linux epoll** 的轻量级并发 HTTP 服务器：主/从 Reactor 网络模型、自定义线程池、MySQL 连接池、JWT 鉴权与 Redis 缓存/限流/去重，前端为纯静态页面。
 
-## 项目概览
+> 仅支持 Linux（依赖 epoll / eventfd / pthread，构建期校验平台）。
 
-### 技术栈
-- **语言与标准**：C++（基于 pthread 与 POSIX 网络/IO）
-- **网络模型**：epoll Reactor（主/从 Reactor），eventfd 唤醒
-- **并发模型**：自定义线程池（任务队列 + 工作者线程）
-- **协议与解析**：Boost.Beast 处理 HTTP 请求/响应
-- **数据存储**：MySQL（连接池 + 预处理语句）
-- **日志**：同步/异步日志（后台写线程 + 线程安全队列）
-- **配置**：命令行参数 + 配置文件读取
+## 技术栈与架构
 
----
+- **语言/标准**：C++20（线程与同步一律使用标准库 `std::thread` / `std::mutex` / `std::condition_variable` / `std::counting_semaphore`）
+- **网络模型**：epoll 主/从 Reactor（**边缘触发 ET + 非阻塞 fd**），eventfd 跨线程唤醒
+- **并发模型**：线程池（`std::thread` + 有界任务队列，队列满快速失败做背压保护，不阻塞事件循环）
+- **HTTP**：Boost.Beast 解析/序列化；解析三态 `Ok/NeedMore/Error`，半包缓冲累积等待补齐
+- **存储**：MySQL 连接池（信号量控制 + 预处理语句防注入）
+- **缓存/会话**：Redis（redis-plus-plus + hiredis，默认依赖）——详情/列表/评论/统计缓存、浏览量去重、登录限流、refresh token 吊销
+- **鉴权**：JWT（libjwt, HS256）双 token（access/refresh）
+- **日志**：同步/异步日志（`ILogger` 抽象 + 后台写线程 + 线程安全队列）
+- **可观测**：Prometheus 风格 `/metrics`，`/healthz/live`、`/healthz/ready` 探针
+- **前端**：`Web/` 纯静态页（登录/注册、列表、详情、发布，现代内容站风格）
 
-## 目录结构 & 文件概览
+## 目录结构
 
-核心源码均位于 `TinyServer/` 目录下：
+核心源码在 `TinyServer/`：
 
-- `main.cpp`：程序入口，注册信号处理并启动 `Server`
-- `server.hpp/.cpp`：服务器主控，整合各组件
-- `acceptor.hpp/.cpp`：监听端口与接收连接
-- `reactor.hpp/.cpp`：epoll Reactor + wakeup(eventfd) 退出机制
-- `threadpool.hpp/.cpp`：线程池（任务队列 + 工作者线程）
-- `connectionpool.hpp/.cpp`：MySQL 连接池（带销毁/并发保护）
-- `log.hpp/.cpp`：同步/异步日志（异步写线程 + 队列）
-- `http.hpp/.cpp`：基于 Boost.Beast 的 HTTP 解析与响应序列化
-- `router.hpp/.cpp`：轻量级 HTTP 路由系统
-- `connection.hpp`：连接上下文封装，维护单次 TCP 会话状态
-- `config.hpp/.cpp`：命令行参数与配置文件读取
-- `mutex.hpp`：pthread 同步原语封装（`Mutex`/`Sem`/`CondVar`/`LockGuard`）
-- `thread.hpp`：pthread 线程封装（替代 `std::thread`）
-- `threadsafe_queue.hpp`：线程安全队列（用于日志异步队列）
-- `error.hpp`：错误码与异常类定义
+| 文件 | 职责 |
+|---|---|
+| `main.cpp` | 入口：信号处理（SIGINT/SIGTERM → 优雅停机） |
+| `server.hpp/.cpp` | `Server` 主控：组装组件、定义回调、生命周期管理 |
+| `acceptor.hpp/.cpp` | 监听/accept，accept 后 fd 设非阻塞并限 127.0.0.1 |
+| `reactor.hpp/.cpp` | `MainReactor`（主线程 accept+分发）/ `SubReactor`（每线程一台 epoll）：post 任务队列、最小堆空闲超时、`flush_write` |
+| `connection.hpp` | 连接会话容器：读写缓冲（内部锁）、任务在飞标志、owner 指针（连接级串行化） |
+| `threadpool.hpp/.cpp` | 线程池：`enqueue`（背压阻塞）/ `try_enqueue`（Reactor 侧非阻塞投递） |
+| `connectionpool.hpp/.cpp` | MySQL 连接池 + `stmt_rw_execute`（预处理模板，含事务借出 `borrow/giveBack`） |
+| `service.hpp/.cpp` | `DataService`：全部 SQL 走预处理语句；缓存写失效接入 |
+| `router.hpp/.cpp` | 路由分发 + JWT 签发/校验 + 输入校验（UTF-8 字符计数）+ 接口实现 |
+| `redis_store.hpp/.cpp` | Redis 统一封装（默认依赖；运行期连不上自动降级） |
+| `http.hpp/.cpp` | Beast 解析（body_limit 64KB）/ 序列化 |
+| `log.hpp/.cpp` | 同步/异步日志（`ILogger` + 默认适配器），`LOG_*` 宏 |
+| `metrics.hpp` | 指标注册表 + Prometheus/健康检查渲染 |
+| `threadsafe_queue.hpp` | 线程安全队列（std 实现，供日志异步队列） |
+| `config.hpp/.cpp` | 命令行 + `./Cfg/config` 配置（自动生成/回退） |
+| `error.hpp` | 异常 `Err` + `kErrType` + 退出码 |
+| `thread.hpp` / `mutex.hpp` | **已弃用（`[[deprecated]]`）**：早期 pthread 封装，保留兼容；勿用于新代码 |
 
----
+## 依赖与构建（Linux）
+
+| 依赖 | 说明 | Ubuntu 安装 |
+|---|---|---|
+| CMake ≥ 3.16 / GCC ≥ 11 | C++20 + `<semaphore>` | `sudo apt install build-essential cmake g++` |
+| Boost（Beast header-only / json 库） | HTTP 解析 | `sudo apt install libboost-dev libboost-json-dev` |
+| MySQL client | 连接池 | `sudo apt install libmysqlclient-dev` |
+| libjwt | HS256 JWT | `sudo apt install libjwt-dev` |
+| hiredis | redis++ 底层 | `sudo apt install libhiredis-dev redis-server` |
+| **redis-plus-plus** | 无发行版，需源码编译（产物 `libredis++.so`） | 见下 |
+
+```bash
+# redis-plus-plus（无官方 release，必须自行编译安装）
+git clone https://github.com/sewenew/redis-plus-plus
+cd redis-plus-plus && mkdir -p build && cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release -DREDIS_PLUS_PLUS_CXX_STANDARD=20 -DREDIS_PLUS_PLUS_BUILD_TEST=OFF
+make -j && sudo make install     # 头文件 /usr/local/include，库 /usr/local/lib/libredis++.so
+
+# 构建本服务（Redis 为默认依赖，无需开关）
+cmake -B build -DCMAKE_BUILD_TYPE=Debug
+cmake --build build -j
+```
+
+> 库找不到时 CMake 会 FATAL_ERROR 并打印安装指引；运行时链接需求（与 `readelf -d` 对应）：`libmysqlclient`、`libboost_json`、`libjwt`、`libredis++.so`。
+
+## 运行与配置
+
+```bash
+# 环境变量（均可选）
+TINYSERVER_REDIS_URI=tcp://127.0.0.1:6379   # Redis 地址，默认即本机 6379，可省略
+TINYSERVER_CORS_ORIGIN=https://example.com  # CORS 白名单，默认 *
+
+./build/TinyServer -p 8080   # 命令行参数见 -h；其余配置读 ./Cfg/config（不存在则自动生成）
+```
+
+- Redis **连不上不致命**：服务照常启动，日志给 WARN；业务层 `enabled()` 为 false 后自动降级（缓存穿透 DB、限流/去重回退进程内）。
+- 数据库需按 `TinyServer/DB 结构`（user/article/comment/user_likes 四表，见下方 DDL 注）预建 `webdatabase`，默认账号 `webdb/webdb`（可在配置文件修改）。
+- JWT 密钥须 ≥32 字符：内置演示默认值，**上线必须修改**（改 `Cfg/config` 的 `Jwt_secret`）。
+
+## 核心机制速览
+
+- **主从 Reactor**：主线程只 accept 并用 `post()` 把新连接"过户"到某个 SubReactor（`fd_contexts_` 仅在子线程访问，无锁）；SubReactor 拥有连接的收发/超时/关闭。
+- **连接级串行化**：同一连接同一时刻至多一个业务任务（`task_in_flight` 原子令牌），`req/resp` 因而可复用；worker 只产字节，发送/关闭统一 `post` 回 reactor 线程执行（消除 fd 重用竞争）。
+- **ET + 半包**：循环 `recv` 到 EAGAIN；HTTP 解析三态，`NeedMore` 放回缓冲等补齐。
+- **空闲超时**：最小堆 + lazy deletion + 1s 节流，`epoll_wait` 超时与下一到期时刻联动。
+- **线程池背压**：Reactor 侧用 `try_enqueue`，队列满直接关闭连接（快速失败）避免拖死事件循环。
+- **Redis**：cache-aside（文章详情/列表/评论/统计）、`SETNX` 浏览量去重、登录失败限流、refresh token 黑名单。键表与失效策略见 `REDIS_INTEGRATION.md`。
+- **缓存一致性**：写路径先写 MySQL 再删缓存；短 TTL 弱一致兜底。
+
+## 事件驱动执行过程
+
+1. **启动**：`main` → `Server::init`（日志 → JWT 强度校验 → Redis 连接 → MySQL 连接池 → 线程池 → SubReactor[] → Acceptor → MainReactor）→ `start`（各 SubReactor 起线程跑 `loop`，主线程进 `MainReactor::loop`）。
+2. **连接到达**：`MainReactor` 命中监听 fd → `Acceptor::accept`（非阻塞）→ 轮询选 SubReactor → `post(add_fd + set_callbacks + Connection 领养)`。
+3. **请求处理**：SubReactor `EPOLLIN` → `handle_read` 循环收进读缓冲 → `try_enqueue(process_request)` → worker 解析/路由/查库/序列化到写缓冲 → `post` 回 reactor → `flush_write`（EAGAIN 转 EPOLLOUT 续发）→ keep-alive 或关闭。
+4. **清理/停机**：断连/空闲超时 → reactor 线程 `remove_fd`（幂等）；信号 → `Server::stop`（幂等）唤醒各 reactor 退出 → join → 析构先收线程池。
 
 ## 错误码规范
 
-- **-1**：非正常退出（`defaultType`）
-- **1**：数据库相关问题（`Sql_init` / `Sql_conn`）
-- **2**：Reactor 模型初始化错误（`Reactor_init`）
-- **3**：Acceptor 连接初始化错误（`Acceptor_init`）
+- **-1**：配置/未知非正常退出
+- **1**：数据库初始化/连接（`Sql_init`/`Sql_conn`）
+- **2**：Reactor 初始化（`Reactor_init`）
+- **3**：Acceptor 绑定/监听失败（`Acceptor_init`）
 
----
+> `kErrType` 另含 `Thread_wrong`、`Redis_error`（Redis 运行期降级按 WARN 处理，不触发进程退出）。
 
-## 核心组件说明
+## 文档索引
 
-### 基础支持组件
-- **`mutex.hpp`**：封装 `pthread_mutex_t`、`pthread_sem_t`、`pthread_cond_t`，提供 `Mutex`、`Sem`、`CondVar` 及 RAII `LockGuard`。
-- **`thread.hpp`**：`Thread` 类底层封装 `pthread_create/join/detach`，捕获异常避免跨 pthread 传播。
-- **`threadsafe_queue.hpp`**：线程安全队列 `ThreadSafeQueue`，底层使用 `std::queue` + `Mutex/CondVar`，提供超时阻塞 `popWithTime`。
-- **`config.hpp`**：`Config` 类单例，负责解析命令行和读取默认配置文件（`./Cfg/config`），涵盖并发数（默认100线程池/150连接池）、各缓冲参数及数据库配置（JWT 密钥可配置，建议上线修改不使用默认值 `change_me`）。
+- 接口约定：`API_CONVENTIONS.md`（REST 风格 + 注册/登录/文章/评论约定）
 
-### 核心业务组件
-- **`log.hpp` (Log)**：全局单例日志系统。支持同步和异步模式。异步模式通过内部维护 `ThreadSafeQueue`，利用后台写线程 `worker_func_` 持续落盘避免阻塞业务层，提供宏定义如 `LOG_INFO`, `LOG_ERR` 快速输出。
-- **`connectionpool.hpp` (ConnPool)**：全局单例 MySQL 连接池。封装 `getConnection()` (信号量控制) 和 `releaseConnection()` 返回池内。提供幂等且并发安全的 `destroy()` 机制等待借出的连接安稳释放。
-- **`threadpool.hpp` (ThreadPool)**：指定数量工作线程，将 `SubReactor` 中唤起的请求通过 `enqueue()` 添加为闭包任务投入任务队列，任务队列满时会自动阻挡投递。
-- **`http.hpp` & `router.hpp` (HTTP路由)**：
-  - HTTP 利用 `Boost.Beast` 的 `http::request` 与 `http::response` 进行底层序列与反序列解析。
-  - `Router` 类按精确路径和 Method 对 `std::vector<char>` 二进制明文数据分析，路由派发后转化为响应二进制输出。如：`/api/login` 返回 JWT 及 RefreshToken 等。
 
-### 网络模型组件
-- **`acceptor.hpp` (Acceptor)**：监听 TCP 端口并进行新连接请求 `accept()` 接受分配新的 File Descriptor (fd)。
-- **`reactor.hpp` (Main/Sub Reactor)**：
-  - `MainReactor` 运行于主线程，绑定 `Acceptor` 等待建立连接并负载给下一个 `SubReactor`。
-  - `SubReactor` 每个占用一 `Thread` 跑 `loop()`，专注于自己字典中的 fd 的后续 IO 事件（`epoll_wait` 异步可读），发现可读立刻上报给 `ThreadPool`。两者均采用 `eventfd` 结构唤醒自身优雅退出。
-- **`connection.hpp` (Connection)**：TCP 上下文类，用 `shared_ptr` 管理。绑定 fd，自带读写环形/流式缓冲区防止粘包半包，提供给业务存放其 `HttpRequest`/`HttpResponse` 回调处理使用。
-- **`server.hpp` (Server)**：汇总控制上述所有组件。
+## 说明
 
----
-
-## 依赖关系与执行流程
-
-### 依赖关系图谱
-1. `Server` -> `Config`, `Acceptor`, `MainReactor`, `SubReactor`, `ThreadPool`, `ConnPool` (隐式), `Log` (隐式), `Router`
-2. `MainReactor` -> `Acceptor`, `SubReactor[]`
-3. `SubReactor` -> 闭包中的 `std::shared_ptr<Connection>` -> `ThreadPool` 投递任务
-4. `Log` & `ConnPool` 随时贯穿至单例或各类函数中调用使用。
-
-### 事件驱动核心执行过程
-1. **启动阶段**：
-   - 入口为 `main()`，实例化并初始化 `Server` 对象。
-   - `Server::init()` 加载配置，启动基础组件(`ConnPool` / `Log`)，配置路由并绑到 `Router`。创建主次 `Reactor`。
-   - `Server::start()` 让每个 `SubReactor` 获取线程独立跑 `loop()`，主线程跑 `MainReactor::loop()`。
-
-2. **连接到来**：
-   - 客户端建立新 TCP，唤醒 `MainReactor`，调用底层 `Acceptor::accept()` 生成 `client_fd`。
-   - 取模轮询放入其中一个 `SubReactor` 并调用 `SubReactor::add_fd`。
-   - 为确保生命周期，`Server` 创建 `std::shared_ptr<Connection>` 对 `client_fd` 托管，向 `SubReactor` 挂载 `handle_read`/`handle_write` 闭包回调注册至 `epoll` 内。
-
-3. **数据读写流转**：
-   - 某子线程内的 `SubReactor` 内 `epoll_wait` 命中 `client_fd` 可读，响应读回调执行 `Server::handle_read(conn)`。
-   - 缓冲区吸取所有字节送入 `conn->append_read_data()` 里避免阻塞 `Reactor`，并立马通过包装 Lambda 将数据交给 `Router` 路由分发进入 `ThreadPool::enqueue()` 待业程消费处理并最终序列化回应。
-
-4. **清理机制**：
-   - 若 recv 得到 0 字节内容或异常错误，闭包返回 `false`。
-   - `SubReactor` 接获 `false` 时执行移除 `remove_fd` 进行关闭和内部清除维护的字典表。
-   - 清除结束使得引用的 `std::function` 被销毁引致其内的 `std::shared_ptr<Connection>` 归零析构完成清理内存。
+- 数据库 DDL（`webdatabase` 的 article/comment/user/user_likes 表结构）以项目实际使用的建表语句为准（utf8mb4、`user.username` 唯一、`user_likes` 唯一键 `(user_id, article_id)` 等），见 `INTERVIEW_PREP.md` 或本地建表脚本。
