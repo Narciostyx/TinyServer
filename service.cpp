@@ -1,23 +1,50 @@
 #include "service.hpp"
 
 #include <cstdlib>
+#include <cstring>
 #include <utility>
 #include <vector>
 
 #include <boost/json.hpp>
 #include <mysql/mysql.h>
 
-namespace project {
-	bool DataService::db_query(const std::string& sql, std::function<void(MYSQL_RES*)>&& callback) noexcept
-	{
-		return ConnPool::getInstance().query(sql, std::move(callback));
+#include "redis_store.hpp"
+
+namespace {
+
+	// 文章内容/计数变化后使缓存失效（cache-aside 写路径：先写 DB，再删缓存）。
+	// 详情键按文章删除；列表键只清前端默认首页(articles:list:1:100)，其余分页靠短 TTL 自过期。
+	void invalidate_article_cache(const std::string& article_id, long affected) {
+		if (affected > 0 && project::redis_store::enabled()) {
+			project::redis_store::cache_del("article:" + article_id);
+			project::redis_store::cache_del("articles:list:1:100");
+		}
 	}
 
-	bool DataService::fetch_articles(boost::json::array& out) noexcept
+	// 评论列表缓存失效（发表评论后即时失效；删除评论因无 article_id 上下文，靠 60s TTL 自过期）
+	void invalidate_comments_cache(const std::string& article_id) {
+		if (project::redis_store::enabled())
+			project::redis_store::cache_del("comments:" + article_id);
+	}
+
+	// 文章列表首页缓存失效（新文章发布/列表页写路径调用）
+	void invalidate_article_list_cache() {
+		if (project::redis_store::enabled())
+			project::redis_store::cache_del("articles:list:1:100");
+	}
+
+} // namespace
+
+
+namespace project {
+	bool DataService::fetch_articles(boost::json::array& out, long limit, long offset) noexcept
 	{
 		std::string sql = "SELECT a.id, a.title, DATE_FORMAT(a.create_time, '%Y-%m-%d %H:%i:%s'), u.username, a.likes, a.views "
-						  "FROM article a LEFT JOIN user u ON a.user_id = u.id";
-
+						  "FROM article a LEFT JOIN user u ON a.user_id = u.id "
+						  "ORDER BY a.create_time DESC";
+		if (limit >= 0)
+			sql += " LIMIT " + std::to_string(limit) + " OFFSET " + std::to_string(offset);
+		
 		return db_query(sql, [&](MYSQL_RES* res) {
 			if (!res) {
 				return;
@@ -42,10 +69,12 @@ namespace project {
 		admin = false;
 		user_id = 0;
 
-		return db_stmt_rw("SELECT id,role FROM user WHERE username = ? AND password = ?", [&](void* arg)
+		return db_stmt_rw("SELECT id,role FROM user WHERE username = ? AND password = ? AND is_active = 1", [&](void* arg)
 			{
 				MYSQL_BIND bind[2] = {};
-				bind[0].buffer_type = MYSQL_TYPE_LONG;
+				// user.id 为 bigint：必须用 MYSQL_TYPE_LONGLONG（8 字节）读取，
+				// 用 MYSQL_TYPE_LONG 只写入低 4 字节，id 超过 int 上限时会被截断
+				bind[0].buffer_type = MYSQL_TYPE_LONGLONG;
 				bind[0].buffer = &user_id;
 
 				bind[1].buffer_type = MYSQL_TYPE_TINY;
@@ -59,29 +88,83 @@ namespace project {
 			}, username, password);
 	}
 
+	int DataService::create_user(const std::string& username, const std::string& password) noexcept
+	{
+		// 1) 用户名查重（预处理 + 参数绑定，防注入）
+		bool exists = false;
+		{
+			db_stmt_rw("SELECT 1 FROM user WHERE username = ? LIMIT 1", [&](void* arg)
+				{
+					auto stmt = static_cast<MYSQL_STMT*>(arg);
+					if (!stmt) return;
+					MYSQL_BIND b = {};
+					int one = 0;
+					b.buffer_type = MYSQL_TYPE_LONG;
+					b.buffer = &one;
+					if (mysql_stmt_bind_result(stmt, &b)) return;
+					if (mysql_stmt_fetch(stmt) == 0) exists = true;
+				}, username);
+		}
+		if (exists)
+			return 1;
+
+		// 2) 插入新用户：role=0（普通用户，与登录接口的整数 role 语义一致）
+		//    并发同名注册由表上的唯一索引兜底（建议 UNIQUE KEY uk_username(username)）。
+		long affected = 0;
+		bool ok = db_stmt_rw("INSERT INTO user (username, password, role,is_active, create_time) VALUES (?, ?, 0, 1, NOW())",
+			[&](void* arg)
+			{
+				affected = *(long*)arg;
+			}, username, password);
+
+		return (ok && affected > 0) ? 0 : -1;
+	}
+
 	bool DataService::create_comment(int article_id, long user_id, const std::string& content, long& affected) noexcept
 	{
 		affected = 0;
-		return db_stmt_rw("INSERT INTO comment (article_id, user_id, content,created_at) VALUES (?,?,?,NOW())", [&](void* arg)
+		bool ok = db_stmt_rw("INSERT INTO comment (article_id, user_id, content,created_at) VALUES (?,?,?,NOW())", [&](void* arg)
 			{
 				affected = *(long*)arg;
 			}, article_id, user_id, content);
+		if (ok && affected > 0)
+			invalidate_comments_cache(std::to_string(article_id));
+		return ok;
 	}
 
 	bool DataService::create_article(const std::string& title, const std::string& content, long user_id, long& affected) noexcept
 	{
 		affected = 0;
-		return db_stmt_rw("INSERT INTO article (title, content, user_id,create_time,likes,views) VALUES (?,?,?,NOW(),0,0)", [&](void* arg)
+		bool ok = db_stmt_rw("INSERT INTO article (title, content, user_id,create_time,likes,views) VALUES (?,?,?,NOW(),0,0)", [&](void* arg)
 			{
 				affected = *(long*)arg;
-			}, title, content, std::to_string(user_id));
+			}, title, content, user_id);
+		// 新文章发布后首页列表缓存失效
+		if (ok && affected > 0)
+			invalidate_article_list_cache();
+		return ok;
 	}
 
 	bool DataService::fetch_article_detail(const std::string& article_id, long user_id, boost::json::object& out, bool& found) noexcept
 	{
 		found = false;
 
-		return db_stmt_rw("SELECT a.title,a.content,DATE_FORMAT(a.create_time, '%Y-%m-%d %H:%i:%s') AS create_time,u.username,a.likes,a.views,CASE WHEN ul.id IS NOT NULL THEN 1 ELSE 0 END AS user_liked FROM article a LEFT JOIN user u ON a.user_id = u.id LEFT JOIN user_likes ul ON ul.article_id = a.id AND ul.user_id = ? WHERE a.id = ? ",
+		// 缓存（cache-aside）：仅缓存"未登录"视角（userLiked=false 恒成立，缓存安全）。
+		// 登录用户回源 DB，保证 userLiked 实时正确。Redis 未启用时自动穿透。
+		if (user_id <= 0 && redis_store::enabled())
+		{
+			auto hit = redis_store::cache_get("article:" + article_id);
+			if (hit.has_value())
+			{
+				try {
+					out = boost::json::parse(*hit).as_object();
+					found = true;
+					return true;
+				} catch (...) { /* 缓存损坏：回源 DB */ }
+			}
+		}
+
+		bool db_ok = db_stmt_rw("SELECT a.title,a.content,DATE_FORMAT(a.create_time, '%Y-%m-%d %H:%i:%s') AS create_time,u.username,a.likes,a.views,CASE WHEN ul.id IS NOT NULL THEN 1 ELSE 0 END AS user_liked FROM article a LEFT JOIN user u ON a.user_id = u.id LEFT JOIN user_likes ul ON ul.article_id = a.id AND ul.user_id = ? WHERE a.id = ? ",
 			[&](void* arg)
 			{
 				auto stmt = static_cast<MYSQL_STMT*>(arg);
@@ -163,6 +246,12 @@ namespace project {
 					}
 				}
 			}, user_id, article_id);
+
+		// 回源成功且为匿名视角 → 回填缓存
+		if (db_ok && found && user_id <= 0 && redis_store::enabled())
+			redis_store::cache_setex("article:" + article_id, 300, boost::json::serialize(out));
+
+		return db_ok;
 	}
 
 	bool DataService::fetch_comments(const std::string& article_id, boost::json::array& out) noexcept
@@ -178,7 +267,8 @@ namespace project {
 				unsigned long username_len = 0, content_len = 0;
 
 				MYSQL_BIND bind[3] = {};
-				bind[0].buffer_type = MYSQL_TYPE_LONG;
+				// comment.id 为 bigint：用 LONGLONG（8 字节）读取，避免截断
+				bind[0].buffer_type = MYSQL_TYPE_LONGLONG;
 				bind[0].buffer = &id;
 
 				bind[1].buffer_type = MYSQL_TYPE_STRING;
@@ -219,9 +309,10 @@ namespace project {
 
 				long articles = 0, comments = 0, likes = 0;
 				MYSQL_BIND bind[3] = {};
-				bind[0].buffer_type = MYSQL_TYPE_LONG;
-				bind[1].buffer_type = MYSQL_TYPE_LONG;
-				bind[2].buffer_type = MYSQL_TYPE_LONG;
+				// COUNT()/SUM() 返回 bigint：用 LONGLONG（8 字节）读取
+				bind[0].buffer_type = MYSQL_TYPE_LONGLONG;
+				bind[1].buffer_type = MYSQL_TYPE_LONGLONG;
+				bind[2].buffer_type = MYSQL_TYPE_LONGLONG;
 				bind[0].buffer = &articles;
 				bind[1].buffer = &comments;
 				bind[2].buffer = &likes;
@@ -244,78 +335,196 @@ namespace project {
 		liked_after = false;
 		likes_now = 0;
 
-		db_stmt_rw("SELECT likes FROM article WHERE id=?", [&](void* arg) {
-			auto stmt = static_cast<MYSQL_STMT*>(arg);
-			if (!stmt) return;
-			MYSQL_BIND b = {};
-			b.buffer_type = MYSQL_TYPE_LONG;
-			b.buffer = &likes_now;
-			if (mysql_stmt_bind_result(stmt, &b)) return;
-			if (mysql_stmt_fetch(stmt) == 0) article_found = true;
-			}, article_id);
-
-		if (!article_found) {
-			return true;
+		// 事务需要多条语句在同一连接上执行，故借用连接（而不是逐条 stmt_rw_execute）
+		MYSQL* conn = ConnPool::getInstance().borrow();
+		if (!conn)
+		{
+			LOG_ERR("Failed to get connection for toggle_like.");
+			return false;
 		}
 
+		const int uid = static_cast<int>(user_id);
+
+		// 共享参数绑定
+		MYSQL_BIND b_uid = {};
+		b_uid.buffer_type = MYSQL_TYPE_LONG;
+		b_uid.buffer = const_cast<int*>(&uid);
+
+		MYSQL_BIND b_aid = {};
+		b_aid.buffer_type = MYSQL_TYPE_STRING;
+		b_aid.buffer = const_cast<char*>(article_id.c_str());
+		b_aid.buffer_length = static_cast<unsigned long>(article_id.size());
+
+		// 在借用连接上执行一条预处理语句并关闭；失败打印日志返回 false
+		auto exec = [&](const char* sql, MYSQL_BIND* params, int nparams) -> bool {
+			MYSQL_STMT* st = mysql_stmt_init(conn);
+			if (!st)
+			{
+				LOG_ERR("toggle_like stmt init failed: " + std::string(mysql_error(conn)));
+				return false;
+			}
+			bool ok = true;
+			if (mysql_stmt_prepare(st, sql, (unsigned long)std::strlen(sql)))
+			{ LOG_ERR("toggle_like prepare failed: " + std::string(mysql_stmt_error(st))); ok = false; }
+			if (ok && nparams > 0 && mysql_stmt_bind_param(st, params))
+			{ LOG_ERR("toggle_like bind failed: " + std::string(mysql_stmt_error(st))); ok = false; }
+			if (ok && mysql_stmt_execute(st))
+			{ LOG_ERR("toggle_like execute failed: " + std::string(mysql_stmt_error(st))); ok = false; }
+			mysql_stmt_close(st);
+			return ok;
+		};
+
+		if (mysql_autocommit(conn, 0))
+		{
+			LOG_ERR("toggle_like: disable autocommit failed: " + std::string(mysql_error(conn)));
+			ConnPool::getInstance().giveBack(conn);
+			return false;
+		}
+
+		// 1) 锁文章行并确认存在（不存在则回滚，article_found 保持 false）
+		{
+			const char* sql = "SELECT id FROM article WHERE id = ? FOR UPDATE";
+			MYSQL_BIND params[1] = { b_aid };
+			MYSQL_STMT* st = mysql_stmt_init(conn);
+			bool pre_ok = st != nullptr
+				&& mysql_stmt_prepare(st, sql, (unsigned long)std::strlen(sql)) == 0
+				&& mysql_stmt_bind_param(st, params) == 0
+				&& mysql_stmt_execute(st) == 0;
+			if (!pre_ok)
+			{
+				LOG_ERR("toggle_like: lock article failed: " + std::string(st ? mysql_stmt_error(st) : mysql_error(conn)));
+				if (st) mysql_stmt_close(st);
+				mysql_rollback(conn);
+				mysql_autocommit(conn, 1);
+				ConnPool::getInstance().giveBack(conn);
+				return false;
+			}
+
+			MYSQL_BIND out_bind = {};
+			long tmp = 0;
+			out_bind.buffer_type = MYSQL_TYPE_LONG;
+			out_bind.buffer = &tmp;
+			bool exists = false;
+			if (mysql_stmt_bind_result(st, &out_bind) == 0 && mysql_stmt_store_result(st) == 0)
+			{
+				if (mysql_stmt_fetch(st) == 0) exists = true;
+			}
+			mysql_stmt_close(st);
+
+			if (!exists)
+			{
+				mysql_rollback(conn);
+				mysql_autocommit(conn, 1);
+				ConnPool::getInstance().giveBack(conn);
+				return true; // 文章不存在
+			}
+			article_found = true;
+		}
+
+		// 2) 查询点赞记录（FOR UPDATE 锁行/间隙，串行化同一用户对同一文章的并发点赞）
 		bool liked_before = false;
-		int one = 0;
-		db_stmt_rw("SELECT 1 FROM user_likes WHERE user_id=? AND article_id=? LIMIT 1", [&](void* arg) {
-			auto stmt = static_cast<MYSQL_STMT*>(arg);
-			if (!stmt) return;
-			MYSQL_BIND b = {};
-			b.buffer_type = MYSQL_TYPE_LONG;
-			b.buffer = &one;
-			if (mysql_stmt_bind_result(stmt, &b)) return;
-			if (mysql_stmt_fetch(stmt) == 0) liked_before = true;
-			}, (int)user_id, article_id);
-
-		if (!liked_before) {
-			long affected = 0;
-			db_stmt_rw("INSERT INTO user_likes (user_id, article_id) VALUES (?, ?)", [&](void* arg) {
-				affected = *(long*)arg;
-				}, (int)user_id, article_id);
-
-			if (affected > 0) {
-				db_stmt_rw("UPDATE article SET likes=likes+1 WHERE id=?", [](void*) {}, article_id);
+		{
+			const char* sql = "SELECT 1 FROM user_likes WHERE user_id = ? AND article_id = ? FOR UPDATE";
+			MYSQL_BIND params[2] = { b_uid, b_aid };
+			MYSQL_STMT* st = mysql_stmt_init(conn);
+			bool pre_ok = st != nullptr
+				&& mysql_stmt_prepare(st, sql, (unsigned long)std::strlen(sql)) == 0
+				&& mysql_stmt_bind_param(st, params) == 0
+				&& mysql_stmt_execute(st) == 0;
+			if (!pre_ok)
+			{
+				LOG_ERR("toggle_like: query user_likes failed: " + std::string(st ? mysql_stmt_error(st) : mysql_error(conn)));
+				if (st) mysql_stmt_close(st);
+				mysql_rollback(conn);
+				mysql_autocommit(conn, 1);
+				ConnPool::getInstance().giveBack(conn);
+				return false;
 			}
-		}
-		else {
-			long affected = 0;
-			db_stmt_rw("DELETE FROM user_likes WHERE user_id=? AND article_id=?", [&](void* arg) {
-				affected = *(long*)arg;
-				}, (int)user_id, article_id);
 
-			if (affected > 0) {
-				db_stmt_rw("UPDATE article SET likes=IF(likes>0, likes-1, 0) WHERE id=?", [](void*) {}, article_id);
+			MYSQL_BIND out_bind = {};
+			int one = 0;
+			out_bind.buffer_type = MYSQL_TYPE_LONG;
+			out_bind.buffer = &one;
+			if (mysql_stmt_bind_result(st, &out_bind) == 0 && mysql_stmt_store_result(st) == 0)
+			{
+				if (mysql_stmt_fetch(st) == 0) liked_before = true;
 			}
+			mysql_stmt_close(st);
 		}
 
-		liked_after = false;
-		one = 0;
-		db_stmt_rw("SELECT 1 FROM user_likes WHERE user_id=? AND article_id=? LIMIT 1", [&](void* arg) {
-			auto stmt = static_cast<MYSQL_STMT*>(arg);
-			if (!stmt) return;
-			MYSQL_BIND b = {};
-			b.buffer_type = MYSQL_TYPE_LONG;
-			b.buffer = &one;
-			if (mysql_stmt_bind_result(stmt, &b)) return;
-			if (mysql_stmt_fetch(stmt) == 0) liked_after = true;
-			}, (int)user_id, article_id);
+		// 3) 写点赞关系 + 更新计数（同一事务，要么全部成功要么回滚）
+		bool write_ok = false;
+		{
+			int delta = liked_before ? -1 : 1;
+			MYSQL_BIND b_delta = {};
+			b_delta.buffer_type = MYSQL_TYPE_LONG;
+			b_delta.buffer = &delta;
 
-		likes_now = 0;
-		article_found = false;
-		db_stmt_rw("SELECT likes FROM article WHERE id=?", [&](void* arg) {
-			auto stmt = static_cast<MYSQL_STMT*>(arg);
-			if (!stmt) return;
-			MYSQL_BIND b = {};
-			b.buffer_type = MYSQL_TYPE_LONG;
-			b.buffer = &likes_now;
-			if (mysql_stmt_bind_result(stmt, &b)) return;
-			if (mysql_stmt_fetch(stmt) == 0) article_found = true;
-			}, article_id);
+			if (!liked_before)
+			{
+				MYSQL_BIND ins_params[2] = { b_uid, b_aid };
+				write_ok = exec("INSERT INTO user_likes (user_id, article_id) VALUES (?, ?)", ins_params, 2);
+			}
+			else
+			{
+				MYSQL_BIND del_params[2] = { b_uid, b_aid };
+				write_ok = exec("DELETE FROM user_likes WHERE user_id = ? AND article_id = ?", del_params, 2);
+			}
 
-		return true;
+			if (write_ok)
+			{
+				MYSQL_BIND upd_params[2] = { b_delta, b_aid };
+				write_ok = exec("UPDATE article SET likes = likes + ? WHERE id = ?", upd_params, 2);
+			}
+		}
+
+		if (write_ok)
+		{
+			if (mysql_commit(conn))
+			{
+				LOG_ERR("toggle_like: commit failed: " + std::string(mysql_error(conn)));
+				mysql_rollback(conn);
+				write_ok = false;
+			}
+			else
+			{
+				liked_after = !liked_before;
+			}
+		}
+		else
+		{
+			mysql_rollback(conn);
+		}
+
+		mysql_autocommit(conn, 1);
+
+		// 4) 提交成功后查询最新计数
+		if (write_ok && article_found)
+		{
+			const char* sql = "SELECT likes FROM article WHERE id = ?";
+			MYSQL_BIND params[1] = { b_aid };
+			MYSQL_STMT* st = mysql_stmt_init(conn);
+			bool pre_ok = st != nullptr
+				&& mysql_stmt_prepare(st, sql, (unsigned long)std::strlen(sql)) == 0
+				&& mysql_stmt_bind_param(st, params) == 0
+				&& mysql_stmt_execute(st) == 0;
+			if (pre_ok)
+			{
+				MYSQL_BIND out_bind = {};
+				out_bind.buffer_type = MYSQL_TYPE_LONG;
+				out_bind.buffer = &likes_now;
+				if (mysql_stmt_bind_result(st, &out_bind) == 0 && mysql_stmt_store_result(st) == 0)
+					mysql_stmt_fetch(st);
+			}
+			if (st) mysql_stmt_close(st);
+		}
+
+		// 提交成功后使详情缓存失效（likes 已变化）
+		if (write_ok && article_found)
+			invalidate_article_cache(article_id, 1);
+
+		ConnPool::getInstance().giveBack(conn);
+		return write_ok;
 	}
 
 	bool DataService::update_view(const std::string& article_id, bool do_inc, long& views_now, bool& found) noexcept
@@ -330,6 +539,8 @@ namespace project {
 				views_now = 0;
 				return true;
 			}
+			// views 已变化：使详情缓存失效
+			invalidate_article_cache(article_id, 1);
 		}
 
 		found = false;
@@ -350,40 +561,75 @@ namespace project {
 	bool DataService::update_article(const std::string& article_id, long user_id, const std::string& title, const std::string& content, long& affected) noexcept
 	{
 		affected = 0;
-		return db_stmt_rw("UPDATE article SET title=?, content=? WHERE id=? AND user_id=?",
+		bool ok = db_stmt_rw("UPDATE article SET title=?, content=? WHERE id=? AND user_id=?",
 			[&](void* arg) { affected = *(long*)arg; },
 			title, content, article_id, user_id);
+		if (ok) invalidate_article_cache(article_id, affected);
+		return ok;
 	}
 
 	bool DataService::update_article_title(const std::string& article_id, long user_id, const std::string& title, long& affected) noexcept
 	{
 		affected = 0;
-		return db_stmt_rw("UPDATE article SET title=? WHERE id=? AND user_id=?",
+		bool ok = db_stmt_rw("UPDATE article SET title=? WHERE id=? AND user_id=?",
 			[&](void* arg) { affected = *(long*)arg; },
 			title, article_id, user_id);
+		if (ok) invalidate_article_cache(article_id, affected);
+		return ok;
 	}
 
 	bool DataService::update_article_content(const std::string& article_id, long user_id, const std::string& content, long& affected) noexcept
 	{
 		affected = 0;
-		return db_stmt_rw("UPDATE article SET content=? WHERE id=? AND user_id=?",
+		bool ok = db_stmt_rw("UPDATE article SET content=? WHERE id=? AND user_id=?",
 			[&](void* arg) { affected = *(long*)arg; },
 			content, article_id, user_id);
+		if (ok) invalidate_article_cache(article_id, affected);
+		return ok;
 	}
 
 	bool DataService::delete_article(const std::string& article_id, long user_id, long& affected) noexcept
 	{
 		affected = 0;
-		return db_stmt_rw("DELETE FROM article WHERE id=? AND user_id=?",
+		bool ok = db_stmt_rw("DELETE FROM article WHERE id=? AND user_id=?",
 			[&](void* arg) { affected = *(long*)arg; },
 			article_id, user_id);
+		if (ok) invalidate_article_cache(article_id, affected);
+		return ok;
 	}
 
 	bool DataService::delete_comment(const std::string& comment_id, long user_id, long& affected) noexcept
 	{
 		affected = 0;
-		return db_stmt_rw("DELETE FROM comment WHERE id=? AND user_id=?",
+
+		// 删除前取一次所属文章 id，仅用于删除成功后令评论列表缓存立即失效。
+		// 权限判断不依赖此读取（见下方原子 DELETE），因此即使此处读回异常也只退化为 TTL 过期，不影响删除。
+		long comment_article = 0;
+		{
+			db_stmt_rw("SELECT article_id FROM comment WHERE id = ?",
+				[&](void* arg) {
+					auto stmt = static_cast<MYSQL_STMT*>(arg);
+					if (!stmt) return;
+					MYSQL_BIND bind[1] = {};
+					bind[0].buffer_type = MYSQL_TYPE_LONGLONG; bind[0].buffer = &comment_article;
+					if (mysql_stmt_bind_result(stmt, bind)) return;
+					(void)mysql_stmt_fetch(stmt);
+				}, comment_id);
+		}
+
+		// 权限直接做进单条原子 DELETE：
+		//   - c.user_id = ?  ：评论作者本人可删
+		//   - a.user_id = ?  ：评论所属文章的作者可删（LEFT JOIN；文章已删则此分支为 NULL 失效）
+		// affected > 0 即删除成功；0 表示无匹配（评论不存在或无权限，由调用方回 403）
+		bool ok = db_stmt_rw(
+			"DELETE c FROM comment c LEFT JOIN article a ON a.id = c.article_id "
+			"WHERE c.id = ? AND (c.user_id = ? OR a.user_id = ?)",
 			[&](void* arg) { affected = *(long*)arg; },
-			comment_id, user_id);
+			comment_id, user_id, user_id);
+
+		// 删除成功 → 评论列表缓存立即失效（删除前已取得所属文章 id）
+		if (ok && affected > 0 && comment_article > 0)
+			invalidate_comments_cache(std::to_string(comment_article));
+		return ok;
 	}
 }
