@@ -73,7 +73,7 @@ cmake --build build -j
 TINYSERVER_REDIS_URI=tcp://127.0.0.1:6379   # Redis 地址，默认即本机 6379，可省略
 TINYSERVER_CORS_ORIGIN=https://example.com  # CORS 白名单，默认 *
 
-./build/TinyServer -p 8080   # 命令行参数见 -h；其余配置读 ./Cfg/config（不存在则自动生成）
+./build/TinyServer -p 8080   # 命令行参数见 -h；其余配置读 ./TinyServerVar/config（不存在则自动生成）
 ```
 
 - Redis **连不上不致命**：服务照常启动，日志给 WARN；业务层 `enabled()` 为 false 后自动降级（缓存穿透 DB、限流/去重回退进程内）。
