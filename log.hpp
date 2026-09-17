@@ -17,16 +17,11 @@
 
 namespace project
 {
-	namespace 
-	{ 
-		const int kSleepTime = 10;//线程休眠时间
-	}
-
 	// 抽象的Logger基类
 	class Logger {
 	public:
 		virtual ~Logger() = default;
-		virtual void init(bool /*async*/, int /*buffer_size*/, int /*queue_size*/, long /*row_max*/, std::string /*path*/, long /*row_flush*/) = 0;
+		virtual void init(bool /*async*/, int /*buffer_size*/, int /*queue_size*/, long /*row_max*/, std::string /*path*/, long /*row_flush*/, int /*retry_ms*/) = 0;
 		virtual void write_log(int level, const std::string& data) = 0;
 	};
 
@@ -40,9 +35,16 @@ namespace project
 			return instance;
 		}
 		//初始化日志
-		void init(bool, int, int, long, std::string, long);
+		void init(bool, int, int, long, std::string, long, int);
 		//写入日志
 		void write_log(int, const std::string&);
+
+		/**
+		 * 因异步队列满而被丢弃的日志行数。
+		 * 日志不允许拖垮业务：队列满时有限重试后直接丢弃并计数，由 /metrics 暴露。
+		 * \return 累计丢弃行数
+		 */
+		static long dropped_lines() { return dropped_lines_.load(std::memory_order_relaxed); }
 
 	private:
 		using sysclock = std::chrono::system_clock;
@@ -57,7 +59,11 @@ namespace project
 		ThreadSafeQueue<std::string>* queue_;
 		int buffer_size_;
 		long row_flush_, row_max_;
+		int retry_ms_ = 10;        // 异步队列满时的重试间隔（配置 Log_async_retry_ms）
+		long sync_line_cnt_ = 0;   // 同步模式下自上次 flush 以来已写入的行数
 		std::atomic<long> row_cnt_ = 0;
+		// 异步队列满而丢弃的行数（只计数、不阻塞调用方）
+		inline static std::atomic<long> dropped_lines_{ 0 };
 		//子线程函数：带 1 秒超时阻塞取队列（有数据立即处理；空闲时低频唤醒，退出信号可及时感知）
 		std::function<void(void)> worker_func_ = [this]
 			{
@@ -120,7 +126,7 @@ namespace project
 		inline std::shared_ptr<Logger> get_logger() { return get_logger_ref(); }
 	}
 
-	#define LOG_INIT(flag, buffer_size,queue_size,row_max,path,row_flush) project::LoggerHolder::get_logger()->init(flag, buffer_size, queue_size, row_max, path, row_flush)
+	#define LOG_INIT(flag, buffer_size, queue_size, row_max, path, row_flush, retry_ms) project::LoggerHolder::get_logger()->init(flag, buffer_size, queue_size, row_max, path, row_flush, retry_ms)
 	#define LOG_UNEXPECT(str) project::LoggerHolder::get_logger()->write_log(-1,str)
 	#define LOG_INFO(str) project::LoggerHolder::get_logger()->write_log(0,str)
 	#define LOG_WARN(str) project::LoggerHolder::get_logger()->write_log(1,str)
