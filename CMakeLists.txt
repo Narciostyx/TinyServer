@@ -22,7 +22,11 @@ endif()
 # ============================================================
 # Build options
 # ============================================================
-option(TINYSERVER_BUILD_TESTS "Build test executables" ON)
+# 默认关闭：test_*.cpp 目前内容整体被注释（没有 main），开启后会因
+# "undefined reference to `main`" 链接失败。补齐真实用例后再打开即可。
+# 注意：这四个文件各自带 main，**不要**把它们加进主可执行文件的源列表
+# （TinyServer.vcxproj 里也已从 ClCompile 移到 None，原因相同）。
+option(TINYSERVER_BUILD_TESTS "Build test executables (requires test_*.cpp to define main)" OFF)
 
 # ============================================================
 # Dependencies
@@ -31,12 +35,21 @@ option(TINYSERVER_BUILD_TESTS "Build test executables" ON)
 # ---- Threads (pthread) ----
 find_package(Threads REQUIRED)
 
-# ---- Boost (Beast is header-only; JSON needs the library) ----
+# ---- Boost (Beast/Asio are header-only; JSON needs the library) ----
+# 传输层使用 Boost.Asio 的 io_context / SSL，因此 Boost.Asio 与 Boost.Beast 都是必需的。
+# 说明：Boost >= 1.69 起 Boost.System 已头文件化，Asio 无需单独链接；
+#       若发行版 Boost 更旧，请把下面的组件写成 COMPONENTS json system。
 find_package(Boost REQUIRED COMPONENTS json)
 if(NOT Boost_FOUND)
     # Fallback: if Boost is installed but json component wasn't built,
     # at least find the headers (Beast is header-only)
     find_package(Boost REQUIRED)
+endif()
+
+# ---- OpenSSL (HTTPS / TLS) ----
+find_package(OpenSSL REQUIRED)
+if(NOT OpenSSL_FOUND)
+    message(FATAL_ERROR "OpenSSL not found. Install it, e.g. Ubuntu: sudo apt install libssl-dev")
 endif()
 
 # ---- MySQL / MariaDB client ----
@@ -94,8 +107,7 @@ set(SOURCES
     main.cpp
     server.cpp
     config.cpp
-    acceptor.cpp
-    reactor.cpp
+    asio_transport.cpp
     connectionpool.cpp
     router.cpp
     http.cpp
@@ -108,8 +120,8 @@ set(SOURCES
 set(PUBLIC_HEADERS
     server.hpp
     config.hpp
-    acceptor.hpp
-    reactor.hpp
+    asio_transport.hpp
+    http_session.hpp
     connectionpool.hpp
     router.hpp
     http.hpp
@@ -117,11 +129,11 @@ set(PUBLIC_HEADERS
     service.hpp
     threadpool.hpp
     thread.hpp
-    connection.hpp
     threadsafe_queue.hpp
     mutex.hpp
     alloc.hpp
     error.hpp
+    metrics.hpp
     redis_store.hpp
 )
 
@@ -135,6 +147,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     ${Boost_INCLUDE_DIRS}
     ${MYSQL_INCLUDE_DIR}
     ${JWT_INCLUDE_DIR}
+    ${OPENSSL_INCLUDE_DIR}
 )
 
 target_link_libraries(${PROJECT_NAME} PRIVATE
@@ -142,6 +155,8 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     ${Boost_LIBRARIES}
     ${MYSQL_LIBRARY}
     ${JWT_LIBRARY}
+    OpenSSL::SSL
+    OpenSSL::Crypto
 )
 
 # If link_directories was populated by pkg-config, apply them
@@ -213,6 +228,7 @@ message(STATUS "Redis: enabled (libredis++ = ${REDISXX_LIBRARY}, hiredis = ${HIR
 # ============================================================
 if(TINYSERVER_BUILD_TESTS)
     enable_testing()
+    message(STATUS "Tests: enabled (each test_*.cpp must define its own main)")
 
     function(add_tiny_test test_name test_source)
         add_executable(${test_name} ${test_source})
@@ -221,12 +237,15 @@ if(TINYSERVER_BUILD_TESTS)
             ${Boost_INCLUDE_DIRS}
             ${MYSQL_INCLUDE_DIR}
             ${JWT_INCLUDE_DIR}
+            ${OPENSSL_INCLUDE_DIR}
         )
         target_link_libraries(${test_name} PRIVATE
             Threads::Threads
             ${Boost_LIBRARIES}
             ${MYSQL_LIBRARY}
             ${JWT_LIBRARY}
+            OpenSSL::SSL
+            OpenSSL::Crypto
         )
         target_compile_definitions(${test_name} PRIVATE
             $<$<CONFIG:Debug>:_DEBUG>
@@ -252,7 +271,9 @@ install(FILES ${PUBLIC_HEADERS} DESTINATION include/TinyServer)
 message(STATUS "--------------------------------------------------")
 message(STATUS "  ${PROJECT_NAME} ${PROJECT_VERSION}")
 message(STATUS "  C++ Standard: ${CMAKE_CXX_STANDARD}")
+message(STATUS "  Transport:    Boost.Asio (io_context + SSL) / HTTP + HTTPS")
 message(STATUS "  Boost:        ${Boost_VERSION}")
+message(STATUS "  OpenSSL:      ${OPENSSL_VERSION} (${OPENSSL_INCLUDE_DIR})")
 message(STATUS "  MySQL:        ${MYSQL_INCLUDE_DIR}")
 message(STATUS "  JWT:          ${JWT_INCLUDE_DIR}")
 message(STATUS "  Tests:        ${TINYSERVER_BUILD_TESTS}")
