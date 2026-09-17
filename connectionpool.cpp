@@ -4,16 +4,20 @@
 #include <chrono>
 #include <thread>
 
-void project::ConnPool::init(std::string address, int port, std::string username, std::string password, std::string dbname, int max_size, bool retry)
+void project::ConnPool::init(const Config& cfg)
 {
-	addr_ = address;
-	port_ = port;
-	user_ = username;
-	passwd_ = password;
-	dbname_ = dbname;
-	max_size_ = max_size;
+	addr_ = cfg.address;
+	port_ = cfg.dbport;
+	user_ = cfg.username;
+	passwd_ = cfg.passwd;
+	dbname_ = cfg.dbname;
+	max_size_ = cfg.sql_num;
 	used_size_ = cur_size_ = 0;
-	retry_ = retry;
+	retry_ = cfg.retry;
+	// 连接/重试策略同样来自配置（原实现把这些值硬编码在连接逻辑里）
+	connect_timeout_sec_ = cfg.db_connect_timeout_seconds > 0 ? cfg.db_connect_timeout_seconds : 5;
+	max_attempts_ = cfg.db_max_attempts > 0 ? cfg.db_max_attempts : 10;
+	retry_backoff_max_ms_ = cfg.db_retry_backoff_max_ms > 0 ? cfg.db_retry_backoff_max_ms : 10000;
 
 	LOG_INFO("Start to initialize the connections pool and should have " + std::to_string(max_size_) + " connections.");
 
@@ -40,8 +44,8 @@ void project::ConnPool::init(std::string address, int port, std::string username
 			throw Err("Initialized failed(Initialize MYSQL* failed and exit with code 1).", kErrType::Sql_init);
 		}
 
-		// 设置连接超时，避免连接阶段卡住太久
-		unsigned int timeout = 5; // 秒
+		// 设置连接超时，避免连接阶段卡住太久（DB_connect_timeout_seconds）
+		unsigned int timeout = static_cast<unsigned int>(connect_timeout_sec_);
 		mysql_options(conn, MYSQL_OPT_CONNECT_TIMEOUT, &timeout);
 
 		// 连接前即固定客户端字符集为 utf8mb4（握手阶段生效），
@@ -68,7 +72,7 @@ void project::ConnPool::init(std::string address, int port, std::string username
 			}
 
 			++attempt;
-			if (attempt >= kMaxAttempts)
+			if (attempt >= max_attempts_)
 			{
 				mysql_close(conn);
 				destroy();
@@ -85,7 +89,7 @@ void project::ConnPool::init(std::string address, int port, std::string username
 
 			// 需要等待后重试的情况：连接数用尽/网络连不上
 			bool need_wait = (err == 1040 || err == 1203 || err == 2002 || err == 2003);
-			int wait_ms = need_wait ? std::min(1000 * attempt, 10000) : 0;
+			int wait_ms = need_wait ? std::min(1000 * attempt, retry_backoff_max_ms_) : 0;
 			if (wait_ms > 0)
 			{
 				LOG_WARN(std::string("Connect retry will wait ") + std::to_string(wait_ms) + "ms...");
@@ -137,6 +141,42 @@ MYSQL* project::ConnPool::getConnection()
 	--cur_size_;
 	++used_size_;
 	return conn;
+}
+
+//非阻塞地尝试获取单个连接（取不到立即返回，供探活使用）
+MYSQL* project::ConnPool::try_getConnection() noexcept
+{
+	{
+		std::lock_guard<std::mutex> lock(mutex_);
+		if (prepare_destroy_ || destroy_ || !sem_)
+			return nullptr;
+	}
+
+	// 与 getConnection 的唯一区别：这里用 try_acquire，不等待
+	if (!sem_->try_acquire())
+		return nullptr;
+
+	std::lock_guard<std::mutex> lock(mutex_);
+	if (prepare_destroy_ || destroy_ || !conn_ || conn_->empty())
+	{
+		// 理论上不应发生；为保证信号量与队列一致，归还一次
+		sem_->release();
+		return nullptr;
+	}
+	MYSQL* conn = conn_->front();
+	conn_->pop_front();
+	--cur_size_;
+	++used_size_;
+	return conn;
+}
+
+//采样连接池水位
+void project::ConnPool::stats(long& idle, long& in_use, long& max_conn)
+{
+	std::lock_guard<std::mutex> lock(mutex_);
+	idle = cur_size_;
+	in_use = used_size_;
+	max_conn = max_size_;
 }
 
 //释放单个连接

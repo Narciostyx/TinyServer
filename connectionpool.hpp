@@ -15,6 +15,7 @@
 #include <semaphore>
 #include <memory>
 
+#include "config.hpp"
 #include "log.hpp"
 
 /**
@@ -74,9 +75,9 @@ namespace project
 {
 
 	namespace {
-		constexpr int kMaxAttempts = 10;
 		// std::counting_semaphore 编译期上限。destroy() 会用 release(max_size_) 唤醒所有等待者，
 		// 峰值计数约为 初始空闲数(max_size_) + 唤醒次数(max_size_) ≤ 2*3000，故上限取 6000。
+		// 说明：这是模板参数的硬上限（编译期常量），不是可运行期调整的策略值。
 		constexpr std::ptrdiff_t kConnPoolSemMax = 6000;
 	}
 
@@ -85,7 +86,13 @@ namespace project
 	{
 	public:
 		static ConnPool& getInstance() { static ConnPool instance; return instance; }
-		void init(std::string, int, std::string, std::string, std::string, int, bool);
+		/**
+		 * 按配置初始化连接池。
+		 * 使用的配置项：DB_address / DB_port / DB_username / DB_passwd / DB_dbname / SQL_num /
+		 * DB_retry / DB_connect_timeout_seconds / DB_max_attempts / DB_retry_backoff_max_ms
+		 * \param cfg 服务器配置
+		 */
+		void init(const Config& cfg);
 		/**
 		 * 查询函数
 		 * 仅在参数可控的情况下使用该函数
@@ -293,7 +300,23 @@ namespace project
 		MYSQL* borrow() noexcept { return getConnection(); }
 		void giveBack(MYSQL* conn) noexcept { releaseConnection(conn); }
 
-		friend void connInit(std::string, int, std::string, std::string, std::string, int, bool);
+		/**
+		 * 非阻塞地尝试借出一个连接。
+		 * 与 getConnection() 的唯一区别：信号量用 try_acquire，取不到立即返回 nullptr，**绝不阻塞**。
+		 * 供探活循环判定"连接池当前是否还能服务"。
+		 * \return 可用连接；池已满或正在销毁时返回 nullptr（使用后同样需要 giveBack）
+		 */
+		MYSQL* try_getConnection() noexcept;
+
+		/**
+		 * 采样连接池水位（供指标暴露）
+		 * \param idle 空闲连接数（出参）
+		 * \param in_use 已借出连接数（出参）
+		 * \param max_conn 池容量（出参）
+		 */
+		void stats(long& idle, long& in_use, long& max_conn);
+
+		friend void connInit(const Config&);
 
 		// 逃逸函数接口，利用池中任一空闲连接完成字符转义
 		//std::string escapeString(const std::string& str);
@@ -307,6 +330,10 @@ namespace project
 		int cur_size_;//当前空闲连接数
 		int used_size_;//当前使用连接数
 		int attempt = 0;
+		// 连接/重试策略（来自配置，避免把超时与重试次数硬编码在连接逻辑里）
+		int connect_timeout_sec_ = 5;
+		int max_attempts_ = 10;
+		int retry_backoff_max_ms_ = 10000;
         bool retry_, prepare_destroy_ = false, destroy_ = false;
 		std::list<MYSQL*>* conn_ = nullptr;
 
@@ -347,9 +374,9 @@ namespace project
 	};
 
 	//连接池初始化函数
-	inline void connInit(std::string address, int port, std::string username, std::string password, std::string dbname, int max_size, bool retry)
+	inline void connInit(const Config& cfg)
 	{
-		try { ConnPool::getInstance().init(address, port, username, password, dbname, max_size, retry); }
+		try { ConnPool::getInstance().init(cfg); }
 		catch (Err& e)
 		{
             LOG_ERR(e.getMessage());
