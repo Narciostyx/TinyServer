@@ -5,11 +5,19 @@
 
 #include <boost/json/fwd.hpp>
 
+#include "config.hpp"
 #include "connectionpool.hpp"
 
 namespace project {
 	class DataService {
 	public:
+		/**
+		 * 应用配置（缓存 TTL、默认列表页键）。
+		 * 由 Router::apply_config 调用，把原先硬编码在本文件里的缓存策略改为配置驱动。
+		 * \param cfg 服务器配置
+		 */
+		void apply_config(const Config& cfg);
+
 		// 获取文章列表；limit<0 表示不分页（兼容旧调用），否则按 (offset, limit) 分页
 		bool fetch_articles(boost::json::array& out, long limit = -1, long offset = 0) noexcept;
 		bool authenticate_user(const std::string& username, const std::string& password, long& user_id, bool& admin, bool& valid) noexcept;
@@ -29,6 +37,15 @@ namespace project {
 		bool delete_comment(const std::string& comment_id, long user_id, long& affected) noexcept;
 
 	private:
+		// 缓存策略（由 apply_config 从 Config 灌入，避免硬编码）
+		int cache_ttl_article_seconds_ = 300;
+		std::string default_list_key_ = "articles:list:1:100";
+
+		// 缓存失效（写路径：先写 DB 再删缓存）
+		void invalidate_article_cache(const std::string& article_id, long affected);
+		void invalidate_comments_cache(const std::string& article_id);
+		void invalidate_article_list_cache();
+
 		bool db_query(const std::string& sql, std::function<void(MYSQL_RES*)>&& callback) noexcept
 		{
 			return ConnPool::getInstance().query(sql, std::move(callback));

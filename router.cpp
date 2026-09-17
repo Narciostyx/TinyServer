@@ -1,4 +1,5 @@
 #include "router.hpp"
+#include <atomic>
 #include <cstdlib>
 #include <cstdio>
 #include <cstdint>
@@ -21,28 +22,35 @@ namespace json = boost::json;
 
 namespace project {
 
-    // 浏览量去重：分片锁 + 容量上限 + 过期清理
-    // 修复原实现（进程内单把全局锁 + 永不过期 map）的锁热点与内存无限增长问题。
-    // 注意：进程内状态在多进程部署（SO_REUSEPORT 多 acceptor）下仍会失效，生产应改用 Redis（SETEX + INCR）。
+    // 浏览量去重：分片锁 + 容量上限 + 过期清理。
+    // 窗口与容量改为配置驱动（View_dedup_window_seconds / View_dedup_max_per_shard）；
+    // 分片数是互斥锁数组的维度，必须是编译期常量，故保留为 constexpr。
+    // 注意：进程内状态在多进程部署（SO_REUSEPORT 多 acceptor）下仍会失效，
+    // 生产应走 Redis（SETNX EX + INCR），本类只是 Redis 不可用时的降级实现。
     class ViewDedup {
     public:
-        static constexpr std::chrono::seconds kWindow{ 10 };
         static constexpr size_t kShards = 16;
-        static constexpr size_t kMaxPerShard = 4096;
+
+        void configure(int window_seconds, int max_per_shard) {
+            window_seconds_.store(window_seconds > 0 ? window_seconds : 10, std::memory_order_relaxed);
+            max_per_shard_.store(max_per_shard > 0 ? max_per_shard : 4096, std::memory_order_relaxed);
+        }
 
         // 返回 true 表示本次浏览应当计数（窗口内未重复）；返回 false 表示去重
         bool should_count(const std::string& key, std::chrono::steady_clock::time_point now) {
+            const auto window = std::chrono::seconds(window_seconds_.load(std::memory_order_relaxed));
+            const auto cap = static_cast<size_t>(max_per_shard_.load(std::memory_order_relaxed));
             const size_t shard = std::hash<std::string>{}(key) % kShards;
             std::scoped_lock lk(mu_[shard]);
             auto& m = map_[shard];
             auto it = m.find(key);
-            if (it != m.end() && now - it->second < kWindow)
+            if (it != m.end() && now - it->second < window)
                 return false;
             m[key] = now;
             // 超过容量阈值时清理过期项，防止内存无限增长
-            if (m.size() >= kMaxPerShard) {
+            if (cap > 0 && m.size() >= cap) {
                 for (auto iter = m.begin(); iter != m.end();) {
-                    if (now - iter->second >= kWindow)
+                    if (now - iter->second >= window)
                         iter = m.erase(iter);
                     else
                         ++iter;
@@ -52,11 +60,23 @@ namespace project {
         }
 
     private:
+        std::atomic<int> window_seconds_{ 10 };
+        std::atomic<int> max_per_shard_{ 4096 };
         std::mutex mu_[kShards];
         std::unordered_map<std::string, std::chrono::steady_clock::time_point> map_[kShards];
     };
 
     static ViewDedup g_view_dedup;
+
+    // 浏览去重参数（由 Router::apply_config 从配置灌入）
+    static void configure_view_dedup(int window_seconds, int max_per_shard) {
+        g_view_dedup.configure(window_seconds, max_per_shard);
+    }
+
+    // 登录失败限流参数：同一用户名连续失败 N 次，M 秒内拒绝再次尝试（防爆破）。
+    // 原先为文件内硬编码常量，现改为配置驱动（Login_fail_threshold / Login_fail_window_seconds）。
+    static std::atomic<int> g_login_fail_threshold{ 5 };
+    static std::atomic<int> g_login_fail_window_sec{ 300 };
 
     // token 黑名单 key：对原始 JWT 做 FNV-1a 64 位哈希再转 hex，
     // 避免把数百字节的 JWT 直接作为 Redis key
@@ -71,9 +91,8 @@ namespace project {
         return std::string("token_bl:") + buf;
     }
 
-    // 登录失败限流：同一用户名连续失败 5 次，300 秒内拒绝再次尝试（防爆破）
-    static constexpr long kLoginFailThreshold = 5;
-    static constexpr long kLoginFailWindowSec = 300;
+    // 登录失败限流的阈值/窗口见文件上方的 g_login_fail_threshold / g_login_fail_window_sec
+    // （原先这里是 kLoginFailThreshold = 5 / kLoginFailWindowSec = 300 两个硬编码常量）
 
     // 逐 UTF-8 码点校验"仅允许 ASCII 字母/数字/中文"的字符集，并统计字符数、是否含字母/数字。
     // 中文字符按 1 个字符计（中文一字 = 英文一个字符）；非法 UTF-8 或含其它字符返回 false。
@@ -145,6 +164,15 @@ namespace project {
         jwt_secret_ = cfg.jwt_secret;
         jwt_access_exp_seconds_ = cfg.jwt_access_exp_seconds;
         jwt_refresh_exp_seconds_ = cfg.jwt_refresh_exp_seconds;
+
+        // 缓存 TTL / 去重窗口 / 限流阈值原先硬编码在 router.cpp 与 service.cpp 里，
+        // 这里统一从配置灌入（apply_config 是唯一的配置入口）。
+        service_.apply_config(cfg);
+        configure_view_dedup(cfg.view_dedup_window_seconds, cfg.view_dedup_max_per_shard);
+        g_login_fail_threshold.store(cfg.login_fail_threshold > 0 ? cfg.login_fail_threshold : 5,
+                                     std::memory_order_relaxed);
+        g_login_fail_window_sec.store(cfg.login_fail_window_seconds > 0 ? cfg.login_fail_window_seconds : 300,
+                                      std::memory_order_relaxed);
     }
 
     //认证请求体
@@ -386,7 +414,8 @@ namespace project {
 
                 // 登录失败限流（Redis 启用时生效；未启用则跳过，不阻塞服务）
                 std::string fail_key = "login_fail:" + username;
-                if (redis_store::enabled() && redis_store::get_long(fail_key) >= kLoginFailThreshold) {
+                if (redis_store::enabled()
+                    && redis_store::get_long(fail_key) >= g_login_fail_threshold.load(std::memory_order_relaxed)) {
                     return set_json_err(resp, boost::beast::http::status::too_many_requests,
                                         "Too many login attempts, try again later");
                 }
@@ -416,7 +445,7 @@ namespace project {
                     resp.body() = json::serialize(res_obj);
                 } else {
                     if (redis_store::enabled())
-                        redis_store::incr_with_expire(fail_key, kLoginFailWindowSec);
+                        redis_store::incr_with_expire(fail_key, g_login_fail_window_sec.load(std::memory_order_relaxed));
                     set_json_err(resp, boost::beast::http::status::unauthorized, "Invalid username or password");
                 }
             } catch (const std::exception& e) {
@@ -450,16 +479,17 @@ namespace project {
             resp.body() = json::serialize(res_obj);
         };
 
-        // 登出：把当前 refresh token 拉黑（有效期对齐 refresh token 的 30 天）
+        // 登出：把当前 refresh token 拉黑（有效期由 Refresh_token_ttl_seconds 配置，默认对齐 refresh token 的 30 天）
         // POST /api/logout（携带 refresh token 即可，无需校验有效性）
-        post_routes_["/logout"] = [](auto& req, auto& resp) {
+        post_routes_["/logout"] = [this](auto& req, auto& resp) {
             resp.set(boost::beast::http::field::content_type, "application/json");
             std::string raw_token;
             if (!extract_token(req, raw_token)) {
                 return set_json_err(resp, boost::beast::http::status::unauthorized, "Missing token");
             }
             if (redis_store::enabled()) {
-                redis_store::cache_setex(token_blacklist_key(raw_token), 30L * 24 * 3600, "1");
+                redis_store::cache_setex(token_blacklist_key(raw_token),
+                                         config_.refresh_token_ttl_seconds, "1");
             }
             json::object res;
             res["message"] = "Logged out";
@@ -636,7 +666,11 @@ namespace project {
                 if (route_target == "/articles"
                     || (route_target.size() > 9 && route_target.substr(0, 9) == "/articles" && route_target[9] == '?'))
                 {
-                    long page = 1, page_size = 100;
+                    // 分页默认值/上限来自配置（Article_page_size_default / Article_page_size_max）
+                    const long page_size_max = config_.article_page_size_max > 0 ? config_.article_page_size_max : 100;
+                    long page = 1;
+                    long page_size = config_.article_page_size_default > 0
+                        ? config_.article_page_size_default : page_size_max;
                     // 解析 query：page / pageSize（is_numeric 白名单校验后转数字，防注入/超大值）
                     if (route_target.size() > 10) {
                         std::string_view qs = route_target.substr(10);
@@ -655,7 +689,7 @@ namespace project {
                             else if (k == "pageSize" && n > 0) page_size = n;
                         }
                     }
-                    if (page_size > 100) page_size = 100; // 单页上限
+                    if (page_size > page_size_max) page_size = page_size_max; // 单页上限
 
                     // 列表缓存（cache-aside，TTL 30s）：写路径(发/改/删/点赞/浏览)已使首页键失效，
                     // 其余分页靠短 TTL 容忍延迟
@@ -670,7 +704,7 @@ namespace project {
                         service_.fetch_articles(articles_list, page_size, (page - 1) * page_size);
                         list_body = json::serialize(articles_list);
                         if (redis_store::enabled())
-                            redis_store::cache_setex(list_key, 30, list_body);
+                            redis_store::cache_setex(list_key, config_.cache_ttl_list_seconds, list_body);
                     }
                     resp.result(boost::beast::http::status::ok);
                     resp.body() = std::move(list_body);
@@ -735,7 +769,7 @@ namespace project {
                         service_.fetch_comments(id_str, comments);
                         comments_body = json::serialize(comments);
                         if (redis_store::enabled())
-                            redis_store::cache_setex(comments_key, 60, comments_body);
+                            redis_store::cache_setex(comments_key, config_.cache_ttl_comments_seconds, comments_body);
                     }
                     resp.result(boost::beast::http::status::ok);
                     resp.body() = std::move(comments_body);
@@ -759,7 +793,7 @@ namespace project {
                         service_.fetch_user_stats(auth.user_id, res_obj);
                         stats_body = json::serialize(res_obj);
                         if (redis_store::enabled())
-                            redis_store::cache_setex(stats_key, 30, stats_body);
+                            redis_store::cache_setex(stats_key, config_.cache_ttl_stats_seconds, stats_body);
                     }
                     resp.result(boost::beast::http::status::ok);
                     resp.body() = std::move(stats_body);
@@ -819,7 +853,8 @@ namespace project {
                                 // - 否则回退进程内分片去重表
                                 bool do_inc;
                                 if (redis_store::enabled()) {
-                                    do_inc = redis_store::set_nx_ex("view:" + key, "1", 10);
+                                    do_inc = redis_store::set_nx_ex("view:" + key, "1",
+                                                                    config_.view_dedup_window_seconds);
                                 } else {
                                     auto now = std::chrono::steady_clock::now();
                                     do_inc = g_view_dedup.should_count(key, now);

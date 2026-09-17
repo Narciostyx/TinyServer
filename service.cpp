@@ -2,6 +2,7 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -10,33 +11,44 @@
 
 #include "redis_store.hpp"
 
-namespace {
+// 说明：缓存失效相关的键与 TTL 原先硬编码在本文件的匿名命名空间里
+// （例如列表键写死 "articles:list:1:100"），现改为 DataService 的成员函数 + 配置驱动，
+// 避免"默认分页大小改了、失效键却没跟着改"这类隐性不一致。
+
+namespace project {
+
+	void DataService::apply_config(const Config& cfg)
+	{
+		cache_ttl_article_seconds_ = cfg.cache_ttl_article_seconds > 0 ? cfg.cache_ttl_article_seconds : 300;
+		const int page = cfg.article_page_size_default > 0 ? cfg.article_page_size_default : 100;
+		// 前端默认列表页的缓存键（写路径据此失效），与 Router 的列表缓存键保持一致
+		default_list_key_ = "articles:list:1:" + std::to_string(page);
+	}
 
 	// 文章内容/计数变化后使缓存失效（cache-aside 写路径：先写 DB，再删缓存）。
-	// 详情键按文章删除；列表键只清前端默认首页(articles:list:1:100)，其余分页靠短 TTL 自过期。
-	void invalidate_article_cache(const std::string& article_id, long affected) {
-		if (affected > 0 && project::redis_store::enabled()) {
-			project::redis_store::cache_del("article:" + article_id);
-			project::redis_store::cache_del("articles:list:1:100");
+	// 详情键按文章删除；列表键只清前端默认首页，其余分页靠短 TTL 自过期。
+	void DataService::invalidate_article_cache(const std::string& article_id, long affected)
+	{
+		if (affected > 0 && redis_store::enabled()) {
+			redis_store::cache_del("article:" + article_id);
+			redis_store::cache_del(default_list_key_);
 		}
 	}
 
-	// 评论列表缓存失效（发表评论后即时失效；删除评论因无 article_id 上下文，靠 60s TTL 自过期）
-	void invalidate_comments_cache(const std::string& article_id) {
-		if (project::redis_store::enabled())
-			project::redis_store::cache_del("comments:" + article_id);
+	// 评论列表缓存失效（发表评论后即时失效；删除评论因无 article_id 上下文，靠 TTL 自过期）
+	void DataService::invalidate_comments_cache(const std::string& article_id)
+	{
+		if (redis_store::enabled())
+			redis_store::cache_del("comments:" + article_id);
 	}
 
 	// 文章列表首页缓存失效（新文章发布/列表页写路径调用）
-	void invalidate_article_list_cache() {
-		if (project::redis_store::enabled())
-			project::redis_store::cache_del("articles:list:1:100");
+	void DataService::invalidate_article_list_cache()
+	{
+		if (redis_store::enabled())
+			redis_store::cache_del(default_list_key_);
 	}
 
-} // namespace
-
-
-namespace project {
 	bool DataService::fetch_articles(boost::json::array& out, long limit, long offset) noexcept
 	{
 		std::string sql = "SELECT a.id, a.title, DATE_FORMAT(a.create_time, '%Y-%m-%d %H:%i:%s'), u.username, a.likes, a.views "
@@ -249,7 +261,7 @@ namespace project {
 
 		// 回源成功且为匿名视角 → 回填缓存
 		if (db_ok && found && user_id <= 0 && redis_store::enabled())
-			redis_store::cache_setex("article:" + article_id, 300, boost::json::serialize(out));
+			redis_store::cache_setex("article:" + article_id, cache_ttl_article_seconds_, boost::json::serialize(out));
 
 		return db_ok;
 	}
