@@ -7,7 +7,7 @@
 #include <memory>
 #include <string>
 
-#include "log.hpp"-
+#include "log.hpp"
 
 namespace {
 
@@ -57,6 +57,14 @@ bool init(const std::string& uri, std::size_t pool_size) {
 }
 
 bool enabled() { return g_ready.load(std::memory_order_acquire) && g_redis != nullptr; }
+
+bool ping() {
+    if (!enabled()) return false;
+    return safe([&] {
+        g_redis->ping();
+        return true;
+    });
+}
 
 std::optional<std::string> cache_get(const std::string& key) {
     if (!enabled()) return std::nullopt;

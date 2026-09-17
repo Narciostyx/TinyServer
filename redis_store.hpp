@@ -10,6 +10,13 @@ namespace redis_store {
     // Redis 是否已启用且可用
     bool enabled();
 
+    /**
+     * 探活：可用且 PING 成功返回 true。
+     * 注意：这是**阻塞**调用，只应由低频探活线程使用，切勿在 io 线程上调用。
+     * \return true 表示 Redis 可达
+     */
+    bool ping();
+
     // ---------- 缓存（cache-aside，值一律存字符串 / JSON）----------
 
     // 命中返回缓存值；未命中或不可用返回 std::nullopt（调用方回源 DB）
