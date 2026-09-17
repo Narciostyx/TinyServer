@@ -1,54 +1,80 @@
 #include "http.hpp"
 
-#include <boost/beast.hpp>
-#include <cstdint>
-#include <sstream>
+#include <ctime>
+
+#include <boost/json.hpp>
 
 namespace project
 {
-	std::string serialize_http_response(HttpResponse& resp)
+	namespace
 	{
-		if (resp.find(boost::beast::http::field::content_length) == resp.end())
-			resp.set(boost::beast::http::field::content_length, std::to_string(resp.body().size()));
-		// 默认 close；若调用方已显式设置（如 keep-alive），则不再覆盖
-		if (resp.find(boost::beast::http::field::connection) == resp.end())
-			resp.set(boost::beast::http::field::connection, "close");
-		if (resp.find(boost::beast::http::field::content_type) == resp.end())
-			resp.set(boost::beast::http::field::content_type, "text/plain; charset=utf-8");
+		// 固定英文表：避免依赖 locale
+		constexpr const char* kWeekdayNames[7] = { "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
+		constexpr const char* kMonthNames[12] = { "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+												  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
 
-		resp.prepare_payload();
-
-		std::ostringstream oss;
-		oss << resp;
-		return oss.str();
+		std::string to_two_digits(int v)
+		{
+			std::string s = std::to_string(v);
+			if (s.size() < 2)
+				s.insert(s.begin(), '0');
+			return s;
+		}
 	}
 
-	ParseResult parse_http_request(const std::string& raw, HttpRequest& out)
+	std::string make_http_date()
 	{
-		// 显式限制请求体大小（本项目业务字段上限约 8KB，64KB 足够且防 DoS 撑爆内存）。
-		// 超限时 Beast 返回 error::body_limit，会走 Error 分支回 4xx。
-		constexpr std::uint64_t kBodyLimit = 64 * 1024;
+		const std::time_t now = std::time(nullptr);
+		std::tm tm_buf{};
+		// gmtime_r 失败时退化为 Unix epoch，保证仍然返回一个合法格式的时间串
+		if (::gmtime_r(&now, &tm_buf) == nullptr)
+			return std::string("Thu, 01 Jan 1970 00:00:00 GMT");
 
-		boost::beast::error_code ec;
-		boost::beast::http::request_parser<boost::beast::http::string_body> parser;
-		parser.body_limit(kBodyLimit);
-		parser.eager(true);
+		const int wday = (tm_buf.tm_wday >= 0 && tm_buf.tm_wday < 7) ? tm_buf.tm_wday : 0;
+		const int mon = (tm_buf.tm_mon >= 0 && tm_buf.tm_mon < 12) ? tm_buf.tm_mon : 0;
 
-		parser.put(boost::asio::buffer(raw), ec);
-
-		// 数据不完整（半包）：保留数据等待更多字节
-		if (ec == boost::beast::http::error::need_more)
-			return ParseResult::NeedMore;
-
-		// 其他解析错误（含 body 超限）：请求非法
-		if (ec)
-			return ParseResult::Error;
-
-		// 没有报错但还没解析完，同样视为半包
-		if (!parser.is_done())
-			return ParseResult::NeedMore;
-
-		out = parser.get();
-		return ParseResult::Ok;
+		std::string out;
+		out.reserve(29);
+		out += kWeekdayNames[wday];
+		out += ", ";
+		out += to_two_digits(tm_buf.tm_mday);
+		out += ' ';
+		out += kMonthNames[mon];
+		out += ' ';
+		out += std::to_string(tm_buf.tm_year + 1900);
+		out += ' ';
+		out += to_two_digits(tm_buf.tm_hour);
+		out += ':';
+		out += to_two_digits(tm_buf.tm_min);
+		out += ':';
+		out += to_two_digits(tm_buf.tm_sec);
+		out += " GMT";
+		return out;
 	}
-}
+
+	void apply_default_response_headers(HttpResponse& resp,
+									   const std::string& server_header,
+									   const std::string& default_content_type)
+	{
+		// 取值来自配置（Server_header / Default_content_type）；配置成空串表示"不发送该头"
+		if (!server_header.empty() && resp.find(boost::beast::http::field::server) == resp.end())
+			resp.set(boost::beast::http::field::server, server_header);
+
+		// HTTP/1.1 规范要求源服务器必须发送 Date
+		if (resp.find(boost::beast::http::field::date) == resp.end())
+			resp.set(boost::beast::http::field::date, make_http_date());
+
+		if (!default_content_type.empty() && resp.find(boost::beast::http::field::content_type) == resp.end())
+			resp.set(boost::beast::http::field::content_type, default_content_type);
+	}
+
+	void set_json_error(HttpResponse& resp, boost::beast::http::status status, const std::string& msg)
+	{
+		resp.result(status);
+		boost::json::object err_obj;
+		err_obj["message"] = msg;
+		resp.set(boost::beast::http::field::content_type, "application/json; charset=utf-8");
+		resp.body() = boost::json::serialize(err_obj);
+	}
+
+} // namespace project
