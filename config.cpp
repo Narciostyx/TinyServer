@@ -52,6 +52,32 @@ namespace project
 					exit(exit_code = -1);
 				}
 				break;
+			case 'I':
+				io_threads = atoi(optarg);
+				if (io_threads < 0 || io_threads > kMaxThreadNum)
+				{
+					std::cout << "Ilegal value for the io threads.\n";
+					exit(exit_code = -1);
+				}
+				break;
+			case 'P':
+				https_port = atoi(optarg);
+				if (https_port <= 0 || https_port > 65535)
+				{
+					std::cout << "Illegal https port!\n";
+					exit(exit_code = -1);
+				}
+				break;
+			case 'C':
+				tls_cert_file = optarg;
+				break;
+			case 'K':
+				tls_key_file = optarg;
+				break;
+			case 'S':
+				https_enable = true;
+				// 命令行显式开启 HTTPS 时，默认套件/地址沿用配置文件取值
+				break;
 			case 'h':
 			case '?':
 				printHelp();
